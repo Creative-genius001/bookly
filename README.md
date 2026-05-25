@@ -16,7 +16,13 @@ Go + Gin backend for a payment-first, slot-based barbershop booking platform.
 
 ```powershell
 cp .env.example .env
-docker compose up -d postgres redis
+docker-compose up --build
+```
+
+Or run only the dependencies in Docker and start the API on your host:
+
+```powershell
+docker-compose up -d postgres redis
 go run ./cmd/api
 ```
 
