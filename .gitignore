@@ -1,0 +1,9 @@
+.env
+.gocache/
+.idea/
+.vscode/
+bin/
+dist/
+tmp/
+coverage.out
+*.exe
