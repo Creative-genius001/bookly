@@ -2,24 +2,25 @@ package auth
 
 import (
 	"errors"
-	"net/http"
-	"strings"
+	"log/slog"
 
 	"github.com/gin-gonic/gin"
 
 	"barber-booking-backend/internal/httpx"
 	"barber-booking-backend/internal/middleware"
 	"barber-booking-backend/internal/models"
+	errorMap "barber-booking-backend/internal/utils/error"
 )
 
 type Handler struct {
 	service *Service
+	logger  *slog.Logger
 }
 
 type signupRequest struct {
-	Email    string          `json:"email" binding:"required,email"`
+	Email    string          `json:"email" binding:"required"`
 	Phone    string          `json:"phone" binding:"required"`
-	Password string          `json:"password" binding:"required,min=8"`
+	Password string          `json:"password" binding:"required"`
 	Role     models.UserRole `json:"role" binding:"required"`
 }
 
@@ -36,29 +37,38 @@ type logoutRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
-func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
+func NewHandler(service *Service, logger *slog.Logger) *Handler {
+	return &Handler{
+		service: service,
+		logger:  logger.With("component", "auth_service"),
+	}
 }
 
 func (h *Handler) Signup(c *gin.Context) {
+	ctx := c.Request.Context()
+
 	var req signupRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		httpx.BadRequest(c, err.Error())
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Signup Handler", "request body is invalid"))
 		return
 	}
 
-	result, err := h.service.Signup(c.Request.Context(), req.Email, req.Phone, req.Password, req.Role)
+	result, err := h.service.Signup(ctx, req.Email, req.Phone, req.Password, req.Role)
 	if err != nil {
-		if errors.Is(err, ErrInvalidRole) {
-			httpx.BadRequest(c, err.Error())
-			return
+		var appErr *errorMap.AppError
+		if errors.As(err, &appErr) {
+			switch appErr.Code {
+			case errorMap.CodeInvalidInput:
+				httpx.BadRequest(c, appErr)
+				return
+			case errorMap.CodeAlreadyExists:
+				httpx.Conflict(c, appErr)
+				return
+			default:
+				httpx.InternalServerError(c, appErr)
+				return
+			}
 		}
-		if strings.Contains(strings.ToLower(err.Error()), "duplicate") {
-			httpx.Conflict(c, "email or phone already exists")
-			return
-		}
-		httpx.Error(c, http.StatusInternalServerError, "could not create account")
-		return
 	}
 
 	httpx.Created(c, result)
@@ -67,18 +77,26 @@ func (h *Handler) Signup(c *gin.Context) {
 func (h *Handler) Login(c *gin.Context) {
 	var req loginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		httpx.BadRequest(c, err.Error())
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Login Handler", "request body is invalid"))
 		return
 	}
 
 	result, err := h.service.Login(c.Request.Context(), req.Email, req.Password)
 	if err != nil {
-		if errors.Is(err, ErrInvalidCredentials) {
-			httpx.Unauthorized(c, err.Error())
-			return
+		var appErr *errorMap.AppError
+		if errors.As(err, &appErr) {
+			switch appErr.Code {
+			case errorMap.CodeInvalidInput:
+				httpx.BadRequest(c, appErr)
+				return
+			case errorMap.CodeNotFound:
+				httpx.BadRequest(c, appErr)
+				return
+			default:
+				httpx.InternalServerError(c, appErr)
+				return
+			}
 		}
-		httpx.Error(c, http.StatusInternalServerError, "could not login")
-		return
 	}
 
 	httpx.OK(c, result)
@@ -87,18 +105,26 @@ func (h *Handler) Login(c *gin.Context) {
 func (h *Handler) Refresh(c *gin.Context) {
 	var req refreshRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		httpx.BadRequest(c, err.Error())
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Refresh Handler", "request body is invalid"))
 		return
 	}
 
 	result, err := h.service.Refresh(c.Request.Context(), req.RefreshToken)
 	if err != nil {
-		if errors.Is(err, ErrInvalidRefresh) {
-			httpx.Unauthorized(c, err.Error())
-			return
+		var appErr *errorMap.AppError
+		if errors.As(err, &appErr) {
+			switch appErr.Code {
+			case errorMap.CodeInvalidInput:
+				httpx.BadRequest(c, appErr)
+				return
+			case errorMap.CodeNotFound:
+				httpx.BadRequest(c, appErr)
+				return
+			default:
+				httpx.InternalServerError(c, appErr)
+				return
+			}
 		}
-		httpx.Error(c, http.StatusInternalServerError, "could not refresh token")
-		return
 	}
 
 	httpx.OK(c, result)
@@ -107,7 +133,7 @@ func (h *Handler) Refresh(c *gin.Context) {
 func (h *Handler) Logout(c *gin.Context) {
 	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
-		httpx.Unauthorized(c, "authentication required")
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Logout Handler", "invalid user"))
 		return
 	}
 
@@ -115,7 +141,12 @@ func (h *Handler) Logout(c *gin.Context) {
 	_ = c.ShouldBindJSON(&req)
 
 	if err := h.service.Logout(c.Request.Context(), userID.String(), req.RefreshToken); err != nil {
-		httpx.Error(c, http.StatusInternalServerError, "could not logout")
+		var appErr *errorMap.AppError
+		if errors.As(err, &appErr) {
+			httpx.InternalServerError(c, appErr)
+			return
+		}
+		httpx.InternalServerError(c, errorMap.New(errorMap.CodeInternal, "Logout Handler", "failed to logout"))
 		return
 	}
 

@@ -3,7 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
-	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -13,115 +13,186 @@ import (
 	"barber-booking-backend/internal/config"
 	"barber-booking-backend/internal/models"
 	"barber-booking-backend/internal/utils"
+	errorMap "barber-booking-backend/internal/utils/error"
 )
 
 var (
 	ErrInvalidCredentials = errors.New("invalid email or password")
-	ErrInvalidRole        = errors.New("role must be customer or owner")
+	ErrConflict           = errors.New("user already exist")
+	ErrInvalidRole        = errors.New("role is invalid")
 	ErrInvalidRefresh     = errors.New("invalid refresh token")
 )
 
 type Service struct {
 	db     *gorm.DB
 	jwtCfg config.JWTConfig
+	repo   AuthRepository
+	logger *slog.Logger
 }
 
 type AuthResult struct {
-	User   models.User     `json:"user"`
-	Tokens utils.TokenPair `json:"tokens"`
+	User   models.UserResponse `json:"user"`
+	Tokens utils.TokenPair     `json:"tokens"`
 }
 
-func NewService(db *gorm.DB, jwtCfg config.JWTConfig) *Service {
-	return &Service{db: db, jwtCfg: jwtCfg}
+func NewService(db *gorm.DB, jwtCfg config.JWTConfig, repo AuthRepository, logger *slog.Logger) *Service {
+	return &Service{db: db, jwtCfg: jwtCfg, repo: repo, logger: logger}
 }
 
 func (s *Service) Signup(ctx context.Context, email, phone, password string, role models.UserRole) (AuthResult, error) {
 	if role != models.RoleCustomer && role != models.RoleOwner {
-		return AuthResult{}, ErrInvalidRole
+		return AuthResult{}, errorMap.New(errorMap.CodeInvalidInput, "Signup Layer", ErrInvalidRole.Error())
+	}
+
+	email = strings.ToLower(strings.TrimSpace(email))
+	if err := utils.ValidateEmail(email); err != nil {
+		return AuthResult{}, errorMap.New(errorMap.CodeInvalidInput, "Signup Layer", err.Error())
+	}
+	phone = strings.TrimSpace(phone)
+	if err := utils.ValidatePassword(password); err != nil {
+		return AuthResult{}, errorMap.New(errorMap.CodeInvalidInput, "Signup Layer", err.Error())
+	}
+
+	userExist, err := s.repo.FindUserByEmail(ctx, email)
+	if err != nil {
+		return AuthResult{}, err
+	}
+	if userExist != nil {
+		if userExist.Email == email {
+			return AuthResult{}, errorMap.New(errorMap.CodeAlreadyExists, "Signup Layer", "user with this email already exist")
+		}
 	}
 
 	hash, err := utils.HashPassword(password)
 	if err != nil {
-		return AuthResult{}, err
+		return AuthResult{}, errorMap.Wrap(err, errorMap.CodeInternal, "Signup Layer", "could not hash password")
 	}
 
 	user := models.User{
-		Email:        strings.ToLower(strings.TrimSpace(email)),
-		Phone:        strings.TrimSpace(phone),
+		Email:        email,
+		Phone:        phone,
 		PasswordHash: hash,
 		Role:         role,
 	}
 
-	if err := s.db.WithContext(ctx).Create(&user).Error; err != nil {
-		return AuthResult{}, fmt.Errorf("create user: %w", err)
-	}
+	var result AuthResult
+	err = s.repo.WithTransaction(ctx, func(tx *gorm.DB) error {
+		if err := s.repo.CreateUser(ctx, tx, &user); err != nil {
+			return err
+		}
 
-	tokens, err := s.issueTokens(ctx, user)
+		tokens, err := s.issueTokens(ctx, tx, user)
+		if err != nil {
+			return err
+		}
+
+		userResponse := models.UserResponse{
+			ID:    user.ID,
+			Email: user.Email,
+			Phone: user.Phone,
+			Role:  string(user.Role),
+		}
+
+		result = AuthResult{
+			User:   userResponse,
+			Tokens: tokens,
+		}
+
+		return nil
+	})
+
 	if err != nil {
 		return AuthResult{}, err
 	}
 
-	return AuthResult{User: user, Tokens: tokens}, nil
+	return result, nil
 }
 
 func (s *Service) Login(ctx context.Context, email, password string) (AuthResult, error) {
-	var user models.User
-	if err := s.db.WithContext(ctx).Where("email = ?", strings.ToLower(strings.TrimSpace(email))).First(&user).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return AuthResult{}, ErrInvalidCredentials
-		}
-		return AuthResult{}, err
-	}
-
-	if !utils.CheckPassword(user.PasswordHash, password) {
-		return AuthResult{}, ErrInvalidCredentials
-	}
-
-	tokens, err := s.issueTokens(ctx, user)
+	userExist, err := s.repo.FindUserByEmail(ctx, email)
 	if err != nil {
 		return AuthResult{}, err
 	}
 
-	return AuthResult{User: user, Tokens: tokens}, nil
+	if !utils.CheckPassword(userExist.PasswordHash, password) {
+		return AuthResult{}, errorMap.New(errorMap.CodeInvalidInput, "Login Layer", ErrInvalidCredentials.Error())
+	}
+
+	var tx *gorm.DB
+	tokens, err := s.issueTokens(ctx, tx, *userExist)
+	if err != nil {
+		return AuthResult{}, err
+	}
+
+	s.logger.DebugContext(ctx, "tokens issued", "email", email, "userID", userExist.ID)
+
+	userResponse := models.UserResponse{
+		ID:    userExist.ID,
+		Email: userExist.Email,
+		Phone: userExist.Phone,
+		Role:  string(userExist.Role),
+	}
+
+	return AuthResult{User: userResponse, Tokens: tokens}, nil
 }
 
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (AuthResult, error) {
 	claims, err := utils.ParseJWT(refreshToken, s.jwtCfg.Secret, utils.TokenTypeRefresh)
 	if err != nil {
-		return AuthResult{}, ErrInvalidRefresh
+		return AuthResult{}, err
 	}
 
 	tokenHash := utils.HashToken(refreshToken)
+	now := time.Now().UTC()
 
-	var stored models.RefreshToken
-	if err := s.db.WithContext(ctx).
-		Where("token_hash = ? AND revoked_at IS NULL AND expires_at > ?", tokenHash, time.Now().UTC()).
-		First(&stored).Error; err != nil {
-		return AuthResult{}, ErrInvalidRefresh
+	stored, err := s.repo.FindValidRefreshToken(ctx, tokenHash, now)
+	if err != nil {
+		return AuthResult{}, err
 	}
 
-	var user models.User
-	if err := s.db.WithContext(ctx).First(&user, "id = ?", claims.UserID).Error; err != nil {
-		return AuthResult{}, ErrInvalidRefresh
+	user, err := s.repo.FindUserByID(ctx, claims.UserID)
+	if err != nil {
+		var appErr *errorMap.AppError
+		if errors.As(err, &appErr) && appErr.Code == errorMap.CodeNotFound {
+			return AuthResult{}, errorMap.New(errorMap.CodeInvalidInput, "Auth Service layer", "invalid refresh token")
+		}
+		return AuthResult{}, err
 	}
 
 	var result AuthResult
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Delete(&stored).Error; err != nil {
+
+	err = s.repo.WithTransaction(ctx, func(tx *gorm.DB) error {
+		if err := s.repo.RevokeToken(ctx, tx, stored); err != nil {
 			return err
 		}
 
-		tokens, err := utils.GenerateTokenPair(user, s.jwtCfg)
+		tokens, err := utils.GenerateTokenPair(*user, s.jwtCfg)
 		if err != nil {
-			return err
+			return errorMap.Wrap(err, errorMap.CodeInternal, "Auth Service layer", "unable to generate tokens")
 		}
-		if err := storeRefreshToken(ctx, tx, user.ID, tokens.RefreshToken, tokens.RefreshExpiresAt); err != nil {
+
+		newToken := &models.RefreshToken{
+			UserID:    user.ID,
+			TokenHash: utils.HashToken(tokens.RefreshToken),
+			ExpiresAt: tokens.RefreshExpiresAt,
+		}
+
+		if err := s.repo.StoreRefreshToken(ctx, tx, newToken); err != nil {
 			return err
 		}
 
-		result = AuthResult{User: user, Tokens: tokens}
+		result = AuthResult{
+			User: models.UserResponse{
+				ID:    user.ID,
+				Email: user.Email,
+				Phone: user.Phone,
+				Role:  string(user.Role),
+			},
+			Tokens: tokens,
+		}
 		return nil
 	})
+
 	if err != nil {
 		return AuthResult{}, err
 	}
@@ -130,29 +201,34 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (AuthResult,
 }
 
 func (s *Service) Logout(ctx context.Context, userID string, refreshToken string) error {
-	query := s.db.WithContext(ctx).Where("user_id = ?", userID)
-	if refreshToken != "" {
-		query = query.Where("token_hash = ?", utils.HashToken(refreshToken))
-	}
-	return query.Delete(&models.RefreshToken{}).Error
+	s.logger.DebugContext(ctx, "logging out user", "userID", userID, "refreshToken", refreshToken)
+	return s.repo.Logout(ctx, userID, refreshToken)
 }
 
-func (s *Service) issueTokens(ctx context.Context, user models.User) (utils.TokenPair, error) {
+func (s *Service) issueTokens(ctx context.Context, tx *gorm.DB, user models.User) (utils.TokenPair, error) {
 	tokens, err := utils.GenerateTokenPair(user, s.jwtCfg)
 	if err != nil {
-		return utils.TokenPair{}, err
+		return utils.TokenPair{}, errorMap.Wrap(err, errorMap.CodeInternal, "Issue token layer", "unable to generate tokens")
 	}
-	if err := storeRefreshToken(ctx, s.db, user.ID, tokens.RefreshToken, tokens.RefreshExpiresAt); err != nil {
-		return utils.TokenPair{}, err
+	if err := s.StoreRefreshToken(ctx, tx, user.ID, tokens.RefreshToken, tokens.RefreshExpiresAt); err != nil {
+		s.logger.ErrorContext(ctx, "failed to store refresh token", "error", err)
+		return utils.TokenPair{}, errorMap.Wrap(err, errorMap.CodeInternal, "Issue token layer", "unable to store refresh tokens")
 	}
 	return tokens, nil
 }
 
-func storeRefreshToken(ctx context.Context, db *gorm.DB, userID uuid.UUID, refreshToken string, expiresAt time.Time) error {
+func (s *Service) StoreRefreshToken(ctx context.Context, tx *gorm.DB, userID uuid.UUID, refreshToken string, expiresAt time.Time) error {
 	record := models.RefreshToken{
 		UserID:    userID,
 		TokenHash: utils.HashToken(refreshToken),
 		ExpiresAt: expiresAt,
 	}
+
+	db := tx
+
+	if db == nil {
+		db = s.db
+	}
+
 	return db.WithContext(ctx).Create(&record).Error
 }
