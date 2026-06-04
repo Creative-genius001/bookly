@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"barber-booking-backend/internal/httpx"
+	errorMap "barber-booking-backend/internal/utils/error"
 )
 
 type Handler struct {
@@ -21,21 +22,26 @@ func NewHandler(service *Service) *Handler {
 func (h *Handler) GetSlots(c *gin.Context) {
 	date := c.Query("date")
 	if date == "" {
-		httpx.BadRequest(c, "date query parameter is required")
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Booking Handler", "date query parameter is required"))
 		return
 	}
 
-	result, err := h.service.SlotsForDate(c.Request.Context(), c.Param("id"), date, time.Now())
+	result, err := h.service.AvailabilityForDate(c.Request.Context(), c.Param("id"), date, time.Now())
 	if err != nil {
-		switch {
-		case errors.Is(err, ErrShopUnavailable):
-			httpx.NotFound(c, err.Error())
-		case errors.Is(err, ErrSlotWindow):
-			httpx.BadRequest(c, "date must be within the rolling 14-day booking window")
-		default:
-			httpx.Error(c, http.StatusBadRequest, err.Error())
+		var appErr *errorMap.AppError
+		if errors.As(err, &appErr) {
+			switch appErr.Code {
+			case errorMap.CodeNotFound:
+				httpx.NotFound(c, appErr)
+			case errorMap.CodeInvalidInput:
+				httpx.BadRequest(c, appErr)
+			case errorMap.CodeInternal:
+				httpx.InternalServerError(c, appErr)
+			default:
+				httpx.Error(c, http.StatusBadRequest, errorMap.New(errorMap.CodeInternal, "Booking Handler", "an unexpected error occurred").Error())
+			}
+			return
 		}
-		return
 	}
 
 	httpx.OK(c, result)

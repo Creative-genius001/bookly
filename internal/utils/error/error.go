@@ -23,26 +23,26 @@ const (
 	CodeInternal                  // bug or unhandled condition inside this service
 )
 
-func (c Code) String() string {
+func (c Code) String() int {
 	switch c {
 	case CodeNotFound:
-		return "NOT_FOUND"
+		return http.StatusNotFound
 	case CodeAlreadyExists:
-		return "ALREADY_EXISTS"
+		return http.StatusConflict
 	case CodeInvalidInput:
-		return "INVALID_INPUT"
+		return http.StatusBadRequest
 	case CodeUnauthorized:
-		return "UNAUTHORIZED"
+		return http.StatusUnauthorized
 	case CodeForbidden:
-		return "FORBIDDEN"
+		return http.StatusForbidden
 	case CodeTimeout:
-		return "TIMEOUT"
+		return http.StatusGatewayTimeout
 	case CodeUnavailable:
-		return "UNAVAILABLE"
+		return http.StatusServiceUnavailable
 	case CodeInternal:
-		return "INTERNAL"
+		return http.StatusInternalServerError
 	default:
-		return "UNKNOWN"
+		return http.StatusInternalServerError
 	}
 }
 
@@ -211,7 +211,7 @@ func HTTPStatus(err error) int {
 }
 
 type ErrorResponse struct {
-	Code    string            `json:"code"`
+	Code    int               `json:"code"`
 	Message string            `json:"message"`
 	Fields  map[string]string `json:"fields,omitempty"`
 }

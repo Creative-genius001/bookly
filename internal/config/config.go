@@ -12,11 +12,20 @@ type Config struct {
 	Port               string
 	APIBaseURL         string
 	DatabaseURL        string
+	DatabaseLogSQL     bool
+	DatabaseSlowQuery  time.Duration
+	Logging            LoggingConfig
 	Redis              RedisConfig
 	JWT                JWTConfig
 	Paystack           PaystackConfig
 	BookingAmountKobo  int64
 	RateLimitPerMinute int
+}
+
+type LoggingConfig struct {
+	Level     string
+	Format    string
+	AddSource bool
 }
 
 type RedisConfig struct {
@@ -38,6 +47,21 @@ type PaystackConfig struct {
 }
 
 func Load() (Config, error) {
+	logAddSource, err := envBool("LOG_ADD_SOURCE", false)
+	if err != nil {
+		return Config{}, err
+	}
+
+	dbSlowQueryMS, err := envInt("DB_SLOW_QUERY_THRESHOLD_MS", 500)
+	if err != nil {
+		return Config{}, err
+	}
+
+	dbLogSQL, err := envBool("DB_LOG_SQL", false)
+	if err != nil {
+		return Config{}, err
+	}
+
 	redisDB, err := envInt("REDIS_DB", 0)
 	if err != nil {
 		return Config{}, err
@@ -64,10 +88,17 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		AppEnv:      env("APP_ENV", "development"),
-		Port:        env("PORT", "8080"),
-		APIBaseURL:  env("API_BASE_URL", "http://localhost:8080"),
-		DatabaseURL: env("DATABASE_URL", "postgres://barber:barber@localhost:5432/barber_booking?sslmode=disable"),
+		AppEnv:            env("APP_ENV", "development"),
+		Port:              env("PORT", "8080"),
+		APIBaseURL:        env("API_BASE_URL", "http://localhost:8080"),
+		DatabaseURL:       env("DATABASE_URL", "postgres://barber:barber@localhost:5432/barber_booking?sslmode=disable"),
+		DatabaseLogSQL:    dbLogSQL,
+		DatabaseSlowQuery: time.Duration(dbSlowQueryMS) * time.Millisecond,
+		Logging: LoggingConfig{
+			Level:     env("LOG_LEVEL", "info"),
+			Format:    env("LOG_FORMAT", ""),
+			AddSource: logAddSource,
+		},
 		Redis: RedisConfig{
 			Addr:     env("REDIS_ADDR", "localhost:6379"),
 			Password: env("REDIS_PASSWORD", ""),
@@ -122,6 +153,18 @@ func envInt64(key string, fallback int64) (int64, error) {
 	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("%s must be an integer", key)
+	}
+	return parsed, nil
+}
+
+func envBool(key string, fallback bool) (bool, error) {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean", key)
 	}
 	return parsed, nil
 }

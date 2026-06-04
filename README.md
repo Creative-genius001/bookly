@@ -28,6 +28,16 @@ go run ./cmd/api
 
 The API listens on `http://localhost:8080` by default.
 
+## Logging
+
+Logs use structured `slog` output with request IDs, request timing, panic recovery, Redis/API startup events, and Gorm slow-query/error logs.
+
+- `LOG_LEVEL`: `debug`, `info`, `warn`, or `error`.
+- `LOG_FORMAT`: `json` or `text`. If empty, production uses JSON and development uses text.
+- `LOG_ADD_SOURCE`: include source file and line numbers when set to `true`.
+- `DB_SLOW_QUERY_THRESHOLD_MS`: threshold for slow database query warnings.
+- `DB_LOG_SQL`: include raw SQL in database logs when set to `true`.
+
 ## Important endpoints
 
 - `POST /auth/signup`

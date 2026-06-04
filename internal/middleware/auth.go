@@ -10,6 +10,7 @@ import (
 	"barber-booking-backend/internal/httpx"
 	"barber-booking-backend/internal/models"
 	"barber-booking-backend/internal/utils"
+	errorMap "barber-booking-backend/internal/utils/error"
 )
 
 const (
@@ -21,19 +22,19 @@ func Auth(cfg config.JWTConfig) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		if header == "" {
-			httpx.Unauthorized(c, "authorization header is required")
+			httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Auth Middleware", "authorization header is required"))
 			return
 		}
 
 		parts := strings.SplitN(header, " ", 2)
 		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-			httpx.Unauthorized(c, "authorization header must be Bearer token")
+			httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Auth Middleware", "authorization header must be Bearer token"))
 			return
 		}
 
 		claims, err := utils.ParseJWT(parts[1], cfg.Secret, utils.TokenTypeAccess)
 		if err != nil {
-			httpx.Unauthorized(c, "invalid access token")
+			httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Auth Middleware", "invalid access token"))
 			return
 		}
 
@@ -53,11 +54,11 @@ func RequireRole(roles ...models.UserRole) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		role, ok := CurrentRole(c)
 		if !ok {
-			httpx.Unauthorized(c, "authentication required")
+			httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "RequireRole Middleware", "authentication required"))
 			return
 		}
 		if _, exists := allowed[role]; !exists {
-			httpx.Forbidden(c, "insufficient permissions")
+			httpx.Forbidden(c, errorMap.New(errorMap.CodeForbidden, "RequireRole Middleware", "insufficient permissions"))
 			return
 		}
 		c.Next()

@@ -2,6 +2,7 @@ package shops
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -9,10 +10,12 @@ import (
 
 	"barber-booking-backend/internal/httpx"
 	"barber-booking-backend/internal/middleware"
+	errorMap "barber-booking-backend/internal/utils/error"
 )
 
 type Handler struct {
 	service *Service
+	logger  *slog.Logger
 }
 
 type createShopRequest struct {
@@ -56,20 +59,52 @@ type blockedDateRequest struct {
 	Reason string `json:"reason"`
 }
 
-func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
+type shopServiceRequest struct {
+	Name            string `json:"name" binding:"required"`
+	Description     string `json:"description"`
+	Price           int    `json:"price" binding:"required"`
+	BarbingDuration int    `json:"barbing_duration" binding:"required"`
+}
+
+type AddServiceInput struct {
+	OwnerID                uuid.UUID
+	ShopID                 uuid.UUID
+	Name                   string
+	Description            string
+	Price                  int
+	BarbingDurationMinutes int
+}
+
+type UpdateServiceInput struct {
+	ShopID                 uuid.UUID
+	ServiceID              uuid.UUID
+	OwnerID                uuid.UUID
+	Name                   string
+	Description            string
+	Price                  int
+	BarbingDurationMinutes int
+}
+
+func NewHandler(service *Service, logger *slog.Logger) *Handler {
+	return &Handler{service: service, logger: logger}
 }
 
 func (h *Handler) CreateShop(c *gin.Context) {
 	ownerID, ok := middleware.CurrentUserID(c)
 	if !ok {
-		httpx.Unauthorized(c, "authentication required")
+		httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Shop Handler", "unauthorized user"))
+		return
+	}
+
+	currentRole, ok := middleware.CurrentRole(c)
+	if !ok || currentRole != "owner" {
+		httpx.Forbidden(c, errorMap.New(errorMap.CodeForbidden, "Shop Handler", "only users with owner role can create shops"))
 		return
 	}
 
 	var req createShopRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		httpx.BadRequest(c, err.Error())
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", "invalid request body"))
 		return
 	}
 
@@ -103,7 +138,7 @@ func (h *Handler) GetShop(c *gin.Context) {
 func (h *Handler) UpdateShop(c *gin.Context) {
 	ownerID, ok := middleware.CurrentUserID(c)
 	if !ok {
-		httpx.Unauthorized(c, "authentication required")
+		httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Shop Handler", "unauthorized user"))
 		return
 	}
 	shopID, ok := parseUUIDParam(c, "id")
@@ -113,7 +148,7 @@ func (h *Handler) UpdateShop(c *gin.Context) {
 
 	var req updateShopRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		httpx.BadRequest(c, err.Error())
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", "invalid request body"))
 		return
 	}
 
@@ -140,7 +175,7 @@ func (h *Handler) UpdateShop(c *gin.Context) {
 func (h *Handler) UpsertBusinessDays(c *gin.Context) {
 	ownerID, ok := middleware.CurrentUserID(c)
 	if !ok {
-		httpx.Unauthorized(c, "authentication required")
+		httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Shop Handler", "unauthorized user"))
 		return
 	}
 	shopID, ok := parseUUIDParam(c, "id")
@@ -150,7 +185,7 @@ func (h *Handler) UpsertBusinessDays(c *gin.Context) {
 
 	var req scheduleRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		httpx.BadRequest(c, err.Error())
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", "invalid request body"))
 		return
 	}
 
@@ -175,7 +210,7 @@ func (h *Handler) UpsertBusinessDays(c *gin.Context) {
 func (h *Handler) ListBusinessDays(c *gin.Context) {
 	ownerID, ok := middleware.CurrentUserID(c)
 	if !ok {
-		httpx.Unauthorized(c, "authentication required")
+		httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Shop Handler", "unauthorized user"))
 		return
 	}
 	shopID, ok := parseUUIDParam(c, "id")
@@ -194,7 +229,7 @@ func (h *Handler) ListBusinessDays(c *gin.Context) {
 func (h *Handler) PatchBusinessDay(c *gin.Context) {
 	ownerID, ok := middleware.CurrentUserID(c)
 	if !ok {
-		httpx.Unauthorized(c, "authentication required")
+		httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Shop Handler", "unauthorized user"))
 		return
 	}
 	shopID, ok := parseUUIDParam(c, "id")
@@ -208,7 +243,7 @@ func (h *Handler) PatchBusinessDay(c *gin.Context) {
 
 	var req patchBusinessDayRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		httpx.BadRequest(c, err.Error())
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", "invalid request body"))
 		return
 	}
 
@@ -230,7 +265,7 @@ func (h *Handler) PatchBusinessDay(c *gin.Context) {
 func (h *Handler) AddBlockedDate(c *gin.Context) {
 	ownerID, ok := middleware.CurrentUserID(c)
 	if !ok {
-		httpx.Unauthorized(c, "authentication required")
+		httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Shop Handler", "unauthorized user"))
 		return
 	}
 	shopID, ok := parseUUIDParam(c, "id")
@@ -240,7 +275,7 @@ func (h *Handler) AddBlockedDate(c *gin.Context) {
 
 	var req blockedDateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		httpx.BadRequest(c, err.Error())
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", "invalid request body"))
 		return
 	}
 
@@ -260,7 +295,7 @@ func (h *Handler) AddBlockedDate(c *gin.Context) {
 func (h *Handler) ListBlockedDates(c *gin.Context) {
 	ownerID, ok := middleware.CurrentUserID(c)
 	if !ok {
-		httpx.Unauthorized(c, "authentication required")
+		httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Shop Handler", "unauthorized user"))
 		return
 	}
 	shopID, ok := parseUUIDParam(c, "id")
@@ -279,7 +314,7 @@ func (h *Handler) ListBlockedDates(c *gin.Context) {
 func (h *Handler) DeleteBlockedDate(c *gin.Context) {
 	ownerID, ok := middleware.CurrentUserID(c)
 	if !ok {
-		httpx.Unauthorized(c, "authentication required")
+		httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Shop Handler", "unauthorized user"))
 		return
 	}
 	shopID, ok := parseUUIDParam(c, "id")
@@ -298,26 +333,158 @@ func (h *Handler) DeleteBlockedDate(c *gin.Context) {
 	httpx.OK(c, gin.H{"message": "blocked date deleted"})
 }
 
+func (h *Handler) AddService(c *gin.Context) {
+	ownerID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Shop Handler", "unauthorized user"))
+		return
+	}
+	shopID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", "invalid shop ID"))
+		return
+	}
+
+	var req shopServiceRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", "invalid request body"))
+		return
+	}
+
+	service, err := h.service.AddService(c.Request.Context(), AddServiceInput{
+		OwnerID:                ownerID,
+		ShopID:                 shopID,
+		Name:                   req.Name,
+		Description:            req.Description,
+		Price:                  req.Price,
+		BarbingDurationMinutes: req.BarbingDuration,
+	})
+	if err != nil {
+		writeShopError(c, err)
+		return
+	}
+	httpx.Created(c, service)
+
+}
+
+func (h *Handler) ListServices(c *gin.Context) {
+	shopID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", "invalid shop ID"))
+		return
+	}
+
+	services, err := h.service.ListServices(c.Request.Context(), shopID)
+	if err != nil {
+		writeShopError(c, err)
+		return
+	}
+	httpx.OK(c, services)
+}
+
+func (h *Handler) DeleteService(c *gin.Context) {
+	ownerID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Shop Handler", "unauthorized user"))
+		return
+	}
+	serviceID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", "invalid service ID"))
+		return
+	}
+
+	if err := h.service.DeleteService(c.Request.Context(), ownerID, serviceID); err != nil {
+		writeShopError(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"message": "service deleted"})
+}
+
+func (h *Handler) GetService(c *gin.Context) {
+	serviceID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", "invalid service ID"))
+		return
+	}
+
+	service, err := h.service.GetService(c.Request.Context(), serviceID)
+	if err != nil {
+		writeShopError(c, err)
+		return
+	}
+	httpx.OK(c, service)
+}
+
+func (h *Handler) UpdateService(c *gin.Context) {
+	ownerID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Shop Handler", "unauthorized user"))
+		return
+	}
+	shopID, ok := parseUUIDParam(c, "shopId")
+	if !ok {
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", "invalid shop ID"))
+		return
+	}
+	serviceID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", "invalid service ID"))
+		return
+	}
+
+	var req shopServiceRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", "invalid request body"))
+		return
+	}
+
+	service, err := h.service.UpdateService(c.Request.Context(), UpdateServiceInput{
+		ShopID:                 shopID,
+		ServiceID:              serviceID,
+		OwnerID:                ownerID,
+		Name:                   req.Name,
+		Description:            req.Description,
+		Price:                  req.Price,
+		BarbingDurationMinutes: req.BarbingDuration,
+	})
+	if err != nil {
+		writeShopError(c, err)
+		return
+	}
+	httpx.OK(c, service)
+}
+
 func parseUUIDParam(c *gin.Context, name string) (uuid.UUID, bool) {
 	value, err := uuid.Parse(c.Param(name))
 	if err != nil {
-		httpx.BadRequest(c, name+" must be a valid UUID")
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", name+" must be a valid UUID"))
 		return uuid.Nil, false
 	}
 	return value, true
 }
 
 func writeShopError(c *gin.Context, err error) {
-	switch {
-	case errors.Is(err, ErrShopNotFound), errors.Is(err, ErrBusinessDayAbsent):
-		httpx.NotFound(c, err.Error())
-	case errors.Is(err, ErrOwnerHasShop):
-		httpx.Conflict(c, err.Error())
-	case errors.Is(err, ErrForbiddenShop):
-		httpx.Forbidden(c, err.Error())
-	case errors.Is(err, ErrInvalidSchedule):
-		httpx.BadRequest(c, "close_time must be after open_time")
-	default:
-		httpx.Error(c, http.StatusBadRequest, err.Error())
+	var appErr *errorMap.AppError
+	if errors.As(err, &appErr) {
+		switch appErr.Code {
+		case errorMap.CodeNotFound:
+			httpx.NotFound(c, appErr)
+		case errorMap.CodeAlreadyExists:
+			httpx.Conflict(c, appErr)
+		case errorMap.CodeForbidden:
+			httpx.Forbidden(c, appErr)
+		case errorMap.CodeInvalidInput:
+			httpx.BadRequest(c, appErr)
+		case errorMap.CodeUnauthorized:
+			httpx.Unauthorized(c, appErr)
+		case errorMap.CodeInternal:
+			httpx.InternalServerError(c, appErr)
+		default:
+			httpx.Error(c, http.StatusInternalServerError, errorMap.New(errorMap.CodeInternal, "Shop Handler", "an unexpected error occurred").Error())
+		}
+		return
 	}
+
+	httpx.Error(c, http.StatusInternalServerError, errorMap.New(errorMap.CodeInternal, "Shop Handler", "an unexpected error occurred").Error())
 }

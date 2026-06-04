@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"barber-booking-backend/internal/models"
 	"barber-booking-backend/internal/utils"
+	errorMap "barber-booking-backend/internal/utils/error"
 )
 
 var (
@@ -24,7 +26,8 @@ var (
 )
 
 type Service struct {
-	db *gorm.DB
+	db     *gorm.DB
+	logger *slog.Logger
 }
 
 type CreateShopInput struct {
@@ -78,8 +81,8 @@ type BlockedDateInput struct {
 	Reason  string
 }
 
-func NewService(db *gorm.DB) *Service {
-	return &Service{db: db}
+func NewService(db *gorm.DB, logger *slog.Logger) *Service {
+	return &Service{db: db, logger: logger}
 }
 
 func (s *Service) CreateShop(ctx context.Context, input CreateShopInput) (models.Shop, error) {
@@ -92,7 +95,7 @@ func (s *Service) CreateShop(ctx context.Context, input CreateShopInput) (models
 	if input.CapacityPerSlot == 0 {
 		input.CapacityPerSlot = 1
 	}
-	if err := validateShopTiming(input.BarbingDurationMinutes, input.CapacityPerSlot); err != nil {
+	if err := validateShopTiming(input.BarbingDurationMinutes); err != nil {
 		return models.Shop{}, err
 	}
 
@@ -101,7 +104,7 @@ func (s *Service) CreateShop(ctx context.Context, input CreateShopInput) (models
 		return models.Shop{}, err
 	}
 	if count > 0 {
-		return models.Shop{}, ErrOwnerHasShop
+		return models.Shop{}, errorMap.New(errorMap.CodeInvalidInput, "Create Shop", ErrOwnerHasShop.Error())
 	}
 
 	slug := strings.TrimSpace(input.Slug)
@@ -134,7 +137,7 @@ func (s *Service) GetBySlug(ctx context.Context, slug string) (models.Shop, erro
 	var shop models.Shop
 	err := s.db.WithContext(ctx).Where("slug = ?", utils.Slugify(slug)).First(&shop).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return models.Shop{}, ErrShopNotFound
+		return models.Shop{}, errorMap.New(errorMap.CodeNotFound, "Get Shop", ErrShopNotFound.Error())
 	}
 	return shop, err
 }
@@ -168,13 +171,13 @@ func (s *Service) UpdateShop(ctx context.Context, input UpdateShopInput) (models
 		updates["is_active"] = *input.IsActive
 	}
 	if input.BarbingDurationMinutes != nil {
-		if err := validateShopTiming(*input.BarbingDurationMinutes, shop.CapacityPerSlot); err != nil {
+		if err := validateShopTiming(*input.BarbingDurationMinutes); err != nil {
 			return models.Shop{}, err
 		}
 		updates["barbing_duration_minutes"] = *input.BarbingDurationMinutes
 	}
 	if input.CapacityPerSlot != nil {
-		if err := validateShopTiming(shop.BarbingDurationMinutes, *input.CapacityPerSlot); err != nil {
+		if err := validateShopTiming(shop.BarbingDurationMinutes); err != nil {
 			return models.Shop{}, err
 		}
 		updates["capacity_per_slot"] = *input.CapacityPerSlot
@@ -183,7 +186,7 @@ func (s *Service) UpdateShop(ctx context.Context, input UpdateShopInput) (models
 	if len(updates) > 0 {
 		err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			if err := tx.Model(&shop).Updates(updates).Error; err != nil {
-				return err
+				return errorMap.Wrap(err, errorMap.CodeInternal, "Update Shop Service", "Could not update shop details")
 			}
 			if input.Timezone != nil || input.BarbingDurationMinutes != nil || input.CapacityPerSlot != nil {
 				capacity := shop.CapacityPerSlot
@@ -221,13 +224,13 @@ func (s *Service) UpsertBusinessDays(ctx context.Context, input ScheduleInput) (
 	}
 
 	if input.BarbingDurationMinutes != nil {
-		if err := validateShopTiming(*input.BarbingDurationMinutes, shop.CapacityPerSlot); err != nil {
+		if err := validateShopTiming(*input.BarbingDurationMinutes); err != nil {
 			return nil, models.Shop{}, err
 		}
 		shop.BarbingDurationMinutes = *input.BarbingDurationMinutes
 	}
 	if input.CapacityPerSlot != nil {
-		if err := validateShopTiming(shop.BarbingDurationMinutes, *input.CapacityPerSlot); err != nil {
+		if err := validateShopTiming(shop.BarbingDurationMinutes); err != nil {
 			return nil, models.Shop{}, err
 		}
 		shop.CapacityPerSlot = *input.CapacityPerSlot
@@ -250,19 +253,19 @@ func (s *Service) UpsertBusinessDays(ctx context.Context, input ScheduleInput) (
 			"barbing_duration_minutes": shop.BarbingDurationMinutes,
 			"capacity_per_slot":        shop.CapacityPerSlot,
 		}).Error; err != nil {
-			return err
+			return errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: Update shop", "error updating shop")
 		}
 
 		if err := tx.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "shop_id"}, {Name: "weekday"}},
 			DoUpdates: clause.AssignmentColumns([]string{"is_active", "open_time", "close_time", "updated_at"}),
 		}).Create(&days).Error; err != nil {
-			return err
+			return errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: Create business days", "error creating business days")
 		}
 		return refreshFutureSlots(tx, shop.ID, shop.CapacityPerSlot, true)
 	})
 	if err != nil {
-		return nil, models.Shop{}, err
+		return nil, models.Shop{}, errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: Upsert business days", "error upserting business days")
 	}
 
 	return days, shop, nil
@@ -285,7 +288,7 @@ func (s *Service) PatchBusinessDay(ctx context.Context, input PatchBusinessDayIn
 	var day models.BusinessDay
 	if err := s.db.WithContext(ctx).Where("id = ? AND shop_id = ?", input.DayID, input.ShopID).First(&day).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return models.BusinessDay{}, ErrBusinessDayAbsent
+			return models.BusinessDay{}, errorMap.New(errorMap.CodeNotFound, "Shop Service: Find business day", ErrBusinessDayAbsent.Error())
 		}
 		return models.BusinessDay{}, err
 	}
@@ -314,12 +317,12 @@ func (s *Service) PatchBusinessDay(ctx context.Context, input PatchBusinessDayIn
 	if len(updates) > 0 {
 		err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			if err := tx.Model(&day).Updates(updates).Error; err != nil {
-				return err
+				return errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: Update business days", "unable to update business day")
 			}
 			return refreshFutureSlots(tx, input.ShopID, 0, true)
 		})
 		if err != nil {
-			return models.BusinessDay{}, err
+			return models.BusinessDay{}, errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: Line 323", "unable to complete transaction")
 		}
 	}
 	return day, nil
@@ -346,14 +349,14 @@ func (s *Service) AddBlockedDate(ctx context.Context, input BlockedDateInput) (m
 			Columns:   []clause.Column{{Name: "shop_id"}, {Name: "date"}},
 			DoUpdates: clause.AssignmentColumns([]string{"reason", "updated_at"}),
 		}).Create(&blocked).Error; err != nil {
-			return err
+			return errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: Create blocked date", "error creating blocked date")
 		}
-		start, end := dayRange(date)
-		return tx.Model(&models.Slot{}).
-			Where("shop_id = ? AND starts_at >= ? AND starts_at < ? AND starts_at > ? AND booked_count = 0", shop.ID, start.UTC(), end.UTC(), time.Now().UTC()).
-			Update("status", models.SlotBlocked).Error
+		return nil
 	})
-	return blocked, err
+	if err != nil {
+		return models.BlockedDate{}, errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: Add blocked date", "error adding blocked date")
+	}
+	return blocked, nil
 }
 
 func (s *Service) ListBlockedDates(ctx context.Context, ownerID, shopID uuid.UUID) ([]models.BlockedDate, error) {
@@ -362,46 +365,153 @@ func (s *Service) ListBlockedDates(ctx context.Context, ownerID, shopID uuid.UUI
 	}
 	var dates []models.BlockedDate
 	err := s.db.WithContext(ctx).Where("shop_id = ?", shopID).Order("date asc").Find(&dates).Error
-	return dates, err
+	if err != nil {
+		return nil, errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: List blocked dates", "error listing blocked dates")
+	}
+	return dates, nil
 }
 
 func (s *Service) DeleteBlockedDate(ctx context.Context, ownerID, shopID, blockedID uuid.UUID) error {
-	shop, err := s.findOwnedShop(ctx, ownerID, shopID)
+	_, err := s.findOwnedShop(ctx, ownerID, shopID)
 	if err != nil {
 		return err
 	}
 	var blocked models.BlockedDate
 	if err := s.db.WithContext(ctx).Where("id = ? AND shop_id = ?", blockedID, shopID).First(&blocked).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return ErrShopNotFound
+			return errorMap.New(errorMap.CodeNotFound, "Shop Service: Find blocked date", "blocked date not found")
 		}
+		return errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: Find blocked date", "blocked date not found")
+	}
+
+	if err := s.db.Delete(&blocked).Error; err != nil {
+		return errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: Delete blocked date", "failed to delete blocked date")
+	}
+	return nil
+}
+
+func (s *Service) AddService(ctx context.Context, payload AddServiceInput) (*models.Shop, error) {
+	shop, err := s.findOwnedShop(ctx, payload.OwnerID, payload.ShopID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := validateShopTiming(payload.BarbingDurationMinutes); err != nil {
+		return nil, err
+	}
+	service := models.Service{
+		ShopID:            payload.ShopID,
+		Name:              payload.Name,
+		Description:       payload.Description,
+		Price:             payload.Price,
+		DurationInMinutes: payload.BarbingDurationMinutes,
+		IsActive:          true,
+	}
+
+	if err := s.db.Create(&service).Error; err != nil {
+		return nil, errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: Add service", "error adding service")
+	}
+	return &shop, nil
+}
+
+func (s *Service) ListServices(ctx context.Context, shopID uuid.UUID) ([]models.Service, error) {
+	var services []models.Service
+	err := s.db.WithContext(ctx).Where("shop_id = ?", shopID).Find(&services).Error
+	if err != nil {
+		return nil, errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: List services", "error listing services")
+	}
+	return services, nil
+}
+
+func (s *Service) GetService(ctx context.Context, serviceID uuid.UUID) (models.Service, error) {
+	var service models.Service
+	err := s.db.WithContext(ctx).Where("id = ?", serviceID).First(&service).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return models.Service{}, errorMap.New(errorMap.CodeNotFound, "Shop Service: Get service", "service not found")
+	}
+	if err != nil {
+		return models.Service{}, errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: Get service", "error retrieving service")
+	}
+	return service, nil
+}
+
+func (s *Service) DeleteService(ctx context.Context, ownerID, serviceID uuid.UUID) error {
+	var service models.Service
+	err := s.db.WithContext(ctx).Where("id = ?", serviceID).First(&service).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return errorMap.New(errorMap.CodeNotFound, "Shop Service: Find service", "service not found")
+	}
+	if err != nil {
+		return errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: Find service", "error retrieving service")
+	}
+
+	if _, err := s.findOwnedShop(ctx, ownerID, service.ShopID); err != nil {
 		return err
 	}
 
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Delete(&blocked).Error; err != nil {
-			return err
-		}
-		loc, _ := time.LoadLocation(shop.Timezone)
-		localDate := time.Date(blocked.Date.Year(), blocked.Date.Month(), blocked.Date.Day(), 0, 0, 0, 0, loc)
-		start, end := dayRange(localDate)
-		return tx.Model(&models.Slot{}).
-			Where("shop_id = ? AND starts_at >= ? AND starts_at < ? AND starts_at > ? AND booked_count = 0 AND status = ?", shopID, start.UTC(), end.UTC(), time.Now().UTC(), models.SlotBlocked).
-			Update("status", models.SlotAvailable).Error
-	})
+	if err := s.db.Delete(&service).Error; err != nil {
+		return errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: Delete service", "error deleting service")
+	}
+	return nil
 }
 
+func (s *Service) UpdateService(ctx context.Context, payload UpdateServiceInput) (*models.Service, error) {
+	_, err := s.findOwnedShop(ctx, payload.OwnerID, payload.ShopID)
+	if err != nil {
+		return nil, err
+	}
+
+	var service models.Service
+	err = s.db.WithContext(ctx).Where("id = ? AND shop_id = ?", payload.ServiceID, payload.ShopID).First(&service).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, errorMap.New(errorMap.CodeNotFound, "Shop Service: Find service", "service not found")
+	}
+	if err != nil {
+		return nil, errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: Find service", "error retrieving service")
+	}
+
+	updated := false
+
+	if payload.Name != "" {
+		service.Name = payload.Name
+		updated = true
+	}
+	if payload.Description != "" {
+		service.Description = payload.Description
+		updated = true
+	}
+	if payload.Price != 0 && payload.Price < 0 {
+		service.Price = payload.Price
+		updated = true
+	}
+	if payload.BarbingDurationMinutes != 0 {
+		if err := validateShopTiming(payload.BarbingDurationMinutes); err != nil {
+			return nil, err
+		}
+		service.DurationInMinutes = payload.BarbingDurationMinutes
+		updated = true
+	}
+
+	if !updated {
+		return &service, nil
+	}
+
+	if err := s.db.WithContext(ctx).Save(&service).Error; err != nil {
+		return nil, errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: Update service", "error updating service")
+	}
+	return &service, nil
+}
 func (s *Service) findOwnedShop(ctx context.Context, ownerID, shopID uuid.UUID) (models.Shop, error) {
 	var shop models.Shop
 	err := s.db.WithContext(ctx).Where("id = ?", shopID).First(&shop).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return models.Shop{}, ErrShopNotFound
+		return models.Shop{}, errorMap.New(errorMap.CodeNotFound, "Shop Service: Find Owned Shop", ErrShopNotFound.Error())
 	}
 	if err != nil {
-		return models.Shop{}, err
+		return models.Shop{}, errorMap.New(errorMap.CodeInternal, "Shop Service: Find Owned Shop", "failed to find shop")
 	}
 	if shop.OwnerID != ownerID {
-		return models.Shop{}, ErrForbiddenShop
+		return models.Shop{}, errorMap.New(errorMap.CodeForbidden, "Shop Service: Find Owned Shop", ErrForbiddenShop.Error())
 	}
 	return shop, nil
 }
@@ -432,21 +542,18 @@ func (s *Service) uniqueSlugExcluding(ctx context.Context, base string, exclude 
 
 func validateTimezone(value string) error {
 	if strings.TrimSpace(value) == "" {
-		return fmt.Errorf("timezone is required")
+		return errorMap.New(errorMap.CodeInvalidInput, "Validate Timezone", "timezone is required")
 	}
 	_, err := time.LoadLocation(value)
 	if err != nil {
-		return fmt.Errorf("invalid timezone")
+		return errorMap.New(errorMap.CodeInvalidInput, "Validate Timezone", "invalid timezone")
 	}
 	return nil
 }
 
-func validateShopTiming(durationMinutes, capacity int) error {
-	if durationMinutes <= 0 || durationMinutes > 480 {
-		return fmt.Errorf("barbing_duration must be between 1 and 480 minutes")
-	}
-	if capacity <= 0 {
-		return fmt.Errorf("capacity_per_slot must be at least 1")
+func validateShopTiming(durationMinutes int) error {
+	if durationMinutes <= 0 || durationMinutes > 120 {
+		return errorMap.New(errorMap.CodeInvalidInput, "Validate Shop Timing", "barbing_duration must be between 1 and 120 minutes")
 	}
 	return nil
 }
@@ -463,7 +570,7 @@ func normalizeSchedule(open, close string) (string, string, error) {
 	openParsed, _ := time.Parse("15:04", openTime)
 	closeParsed, _ := time.Parse("15:04", closeTime)
 	if !closeParsed.After(openParsed) {
-		return "", "", ErrInvalidSchedule
+		return "", "", errorMap.New(errorMap.CodeInvalidInput, "Validate Schedule", "close time cannot come before open time")
 	}
 	return openTime, closeTime, nil
 }
@@ -478,12 +585,12 @@ func activeDaySet(allDays bool, activeDays []int) (map[int]struct{}, error) {
 	}
 	for _, day := range activeDays {
 		if day < 0 || day > 6 {
-			return nil, fmt.Errorf("active_days values must be between 0 and 6")
+			return nil, errorMap.New(errorMap.CodeInvalidInput, "Validate Active Days", "active_days values must be between 0 and 6")
 		}
 		out[day] = struct{}{}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("active_days is required unless all_days is true")
+		return nil, errorMap.New(errorMap.CodeInvalidInput, "Validate Active Days", "active_days is required unless all_days is true")
 	}
 	return out, nil
 }
@@ -492,7 +599,7 @@ func refreshFutureSlots(tx *gorm.DB, shopID uuid.UUID, capacity int, resetLayout
 	now := time.Now().UTC()
 	if resetLayout {
 		if err := tx.Where("shop_id = ? AND starts_at > ? AND booked_count = 0", shopID, now).Delete(&models.Slot{}).Error; err != nil {
-			return err
+			return errorMap.Wrap(err, errorMap.CodeInternal, "Reset Slots", "Error resetting slots")
 		}
 	}
 	if capacity > 0 {

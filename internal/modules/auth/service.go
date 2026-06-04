@@ -40,7 +40,7 @@ func NewService(db *gorm.DB, jwtCfg config.JWTConfig, repo AuthRepository, logge
 }
 
 func (s *Service) Signup(ctx context.Context, email, phone, password string, role models.UserRole) (AuthResult, error) {
-	if role != models.RoleCustomer && role != models.RoleOwner {
+	if role != models.RoleOwner {
 		return AuthResult{}, errorMap.New(errorMap.CodeInvalidInput, "Signup Layer", ErrInvalidRole.Error())
 	}
 

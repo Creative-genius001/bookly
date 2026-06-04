@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -25,6 +26,7 @@ type Dependencies struct {
 	Config   config.Config
 	DB       *gorm.DB
 	Redis    *redis.Client
+	Logger   *slog.Logger
 	Notifier *notifications.Notifier
 	Paystack *paystack.Client
 }
@@ -34,23 +36,30 @@ func NewRouter(deps Dependencies) http.Handler {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	router := gin.New()
 	router.Use(
 		middleware.RequestID(),
-		gin.Logger(),
-		gin.Recovery(),
+		middleware.ErrorHandler(logger),
+		middleware.Recovery(logger),
+		middleware.RequestLogger(logger),
 		middleware.Timeout(20*time.Second),
 		middleware.RateLimit(deps.Redis, deps.Config.RateLimitPerMinute),
 	)
 
 	locker := locks.NewRedisLocker(deps.Redis)
-	authService := auth.NewService(deps.DB, deps.Config.JWT)
-	shopService := shops.NewService(deps.DB)
-	slotService := slots.NewService(deps.DB)
+	authRepo := auth.NewGormAuthRepository(deps.DB)
+	authService := auth.NewService(deps.DB, deps.Config.JWT, authRepo, logger)
+	shopService := shops.NewService(deps.DB, logger)
+	slotService := slots.NewService(deps.DB, logger)
 	bookingService := bookings.NewService(deps.DB, locker, deps.Paystack, deps.Notifier, deps.Config.BookingAmountKobo)
 
-	authHandler := auth.NewHandler(authService)
-	shopHandler := shops.NewHandler(shopService)
+	authHandler := auth.NewHandler(authService, logger)
+	shopHandler := shops.NewHandler(shopService, logger)
 	slotHandler := slots.NewHandler(slotService)
 	bookingHandler := bookings.NewHandler(bookingService)
 	paymentHandler := payments.NewHandler(bookingService)
@@ -78,20 +87,25 @@ func NewRouter(deps Dependencies) http.Handler {
 		shopRoutes.POST("/:id/blocked-dates", middleware.Auth(deps.Config.JWT), middleware.RequireRole(models.RoleOwner), shopHandler.AddBlockedDate)
 		shopRoutes.GET("/:id/blocked-dates", middleware.Auth(deps.Config.JWT), middleware.RequireRole(models.RoleOwner), shopHandler.ListBlockedDates)
 		shopRoutes.DELETE("/:id/blocked-dates/:blockedDateId", middleware.Auth(deps.Config.JWT), middleware.RequireRole(models.RoleOwner), shopHandler.DeleteBlockedDate)
-		shopRoutes.GET("/:id/slots", slotHandler.GetSlots)
+		shopRoutes.POST("/:id/services", middleware.Auth(deps.Config.JWT), middleware.RequireRole(models.RoleOwner), shopHandler.AddService)
+		shopRoutes.GET("/:id/services", shopHandler.ListServices)
+		shopRoutes.GET("/services/:id", shopHandler.GetService)
+		shopRoutes.PATCH("/:shopId/services/:id", middleware.Auth(deps.Config.JWT), middleware.RequireRole(models.RoleOwner), shopHandler.UpdateService)
+		shopRoutes.DELETE("/services/:id", middleware.Auth(deps.Config.JWT), middleware.RequireRole(models.RoleOwner), shopHandler.DeleteService)
+		shopRoutes.GET("/:id/availability", slotHandler.GetSlots)
 	}
 
 	bookingRoutes := router.Group("/bookings")
 	{
-		bookingRoutes.POST("/initiate", middleware.Auth(deps.Config.JWT), middleware.RequireRole(models.RoleCustomer), bookingHandler.Initiate)
-		bookingRoutes.POST("/reschedule", middleware.Auth(deps.Config.JWT), middleware.RequireRole(models.RoleCustomer), bookingHandler.Reschedule)
-		bookingRoutes.POST("/cancel", middleware.Auth(deps.Config.JWT), middleware.RequireRole(models.RoleCustomer), bookingHandler.Cancel)
-		bookingRoutes.GET("/:code", bookingHandler.GetByCode)
+		bookingRoutes.POST("/initiate", bookingHandler.Initiate)
+		// bookingRoutes.POST("/reschedule", middleware.Auth(deps.Config.JWT), middleware.RequireRole(models.RoleCustomer), bookingHandler.Reschedule)
+		// bookingRoutes.POST("/cancel", middleware.Auth(deps.Config.JWT), middleware.RequireRole(models.RoleCustomer), bookingHandler.Cancel)
+		// bookingRoutes.GET("/:code", bookingHandler.GetByCode)
 	}
 
 	paymentRoutes := router.Group("/payments")
 	{
-		paymentRoutes.POST("/init", middleware.Auth(deps.Config.JWT), middleware.RequireRole(models.RoleCustomer), paymentHandler.Init)
+		paymentRoutes.POST("/init", paymentHandler.Init)
 		paymentRoutes.POST("/webhook", paymentHandler.Webhook)
 	}
 

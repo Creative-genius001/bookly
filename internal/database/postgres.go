@@ -5,14 +5,18 @@ import (
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
+	gormlogger "gorm.io/gorm/logger"
 
 	"barber-booking-backend/internal/models"
 )
 
-func ConnectPostgres(databaseURL string) (*gorm.DB, error) {
+func ConnectPostgres(databaseURL string, dbLogger gormlogger.Interface) (*gorm.DB, error) {
+	if dbLogger == nil {
+		dbLogger = gormlogger.Default.LogMode(gormlogger.Warn)
+	}
+
 	db, err := gorm.Open(postgres.Open(databaseURL), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Warn),
+		Logger: dbLogger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
@@ -30,6 +34,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&models.Slot{},
 		&models.Booking{},
 		&models.Payment{},
+		&models.Service{},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to auto migrate database: %w", err)

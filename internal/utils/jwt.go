@@ -1,7 +1,6 @@
 package utils
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -9,6 +8,7 @@ import (
 
 	"barber-booking-backend/internal/config"
 	"barber-booking-backend/internal/models"
+	errorMap "barber-booking-backend/internal/utils/error"
 )
 
 const (
@@ -70,23 +70,23 @@ func GenerateTokenPair(user models.User, cfg config.JWTConfig) (TokenPair, error
 func ParseJWT(tokenString, secret, expectedType string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method")
+			return nil, errorMap.New(errorMap.CodeInvalidInput, "JWT Parsing", "unexpected signing method")
 		}
 		return []byte(secret), nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, errorMap.Wrap(err, errorMap.CodeInternal, "JWT Parsing", "failed to parse token")
 	}
 
 	claims, ok := token.Claims.(*Claims)
 	if !ok || !token.Valid {
-		return nil, fmt.Errorf("invalid token")
+		return nil, errorMap.New(errorMap.CodeInvalidInput, "JWT Parsing", "invalid token")
 	}
 	if claims.TokenType != expectedType {
-		return nil, fmt.Errorf("invalid token type")
+		return nil, errorMap.New(errorMap.CodeInvalidInput, "JWT Parsing", "invalid token")
 	}
 	if _, err := uuid.Parse(claims.UserID); err != nil {
-		return nil, fmt.Errorf("invalid user id claim")
+		return nil, errorMap.New(errorMap.CodeInvalidInput, "JWT Parsing", "invalid token")
 	}
 
 	return claims, nil
