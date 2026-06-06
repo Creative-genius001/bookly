@@ -6,7 +6,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"barber-booking-backend/internal/httpx"
-	"barber-booking-backend/internal/middleware"
 	"barber-booking-backend/internal/modules/bookings"
 	errorMap "barber-booking-backend/internal/utils/error"
 )
@@ -16,7 +15,8 @@ type Handler struct {
 }
 
 type initRequest struct {
-	BookingCode string `json:"booking_code" binding:"required"`
+	BookingCode       string `json:"booking_code" binding:"required"`
+	PaymmentReference string `json:"payment_reference" binding:"required"`
 }
 
 func NewHandler(bookingsService *bookings.Service) *Handler {
@@ -24,11 +24,6 @@ func NewHandler(bookingsService *bookings.Service) *Handler {
 }
 
 func (h *Handler) Init(c *gin.Context) {
-	customerID, ok := middleware.CurrentUserID(c)
-	if !ok {
-		httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Payment Handler", "unauthorized user"))
-		return
-	}
 
 	var req initRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -36,7 +31,7 @@ func (h *Handler) Init(c *gin.Context) {
 		return
 	}
 
-	result, err := h.bookings.InitializePayment(c.Request.Context(), customerID, req.BookingCode)
+	result, err := h.bookings.InitializePayment(c.Request.Context(), req.BookingCode, req.PaymmentReference)
 	if err != nil {
 		bookings.WriteError(c, err)
 		return

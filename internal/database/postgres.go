@@ -31,7 +31,6 @@ func AutoMigrate(db *gorm.DB) error {
 		&models.Shop{},
 		&models.BusinessDay{},
 		&models.BlockedDate{},
-		&models.Slot{},
 		&models.Booking{},
 		&models.Payment{},
 		&models.Service{},

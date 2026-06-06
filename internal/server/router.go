@@ -56,7 +56,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	authService := auth.NewService(deps.DB, deps.Config.JWT, authRepo, logger)
 	shopService := shops.NewService(deps.DB, logger)
 	slotService := slots.NewService(deps.DB, logger)
-	bookingService := bookings.NewService(deps.DB, locker, deps.Paystack, deps.Notifier, deps.Config.BookingAmountKobo)
+	bookingService := bookings.NewService(deps.DB, locker, logger, deps.Paystack, deps.Notifier, deps.Config.BookingAmountKobo)
 
 	authHandler := auth.NewHandler(authService, logger)
 	shopHandler := shops.NewHandler(shopService, logger)
@@ -90,7 +90,7 @@ func NewRouter(deps Dependencies) http.Handler {
 		shopRoutes.POST("/:id/services", middleware.Auth(deps.Config.JWT), middleware.RequireRole(models.RoleOwner), shopHandler.AddService)
 		shopRoutes.GET("/:id/services", shopHandler.ListServices)
 		shopRoutes.GET("/services/:id", shopHandler.GetService)
-		shopRoutes.PATCH("/:shopId/services/:id", middleware.Auth(deps.Config.JWT), middleware.RequireRole(models.RoleOwner), shopHandler.UpdateService)
+		shopRoutes.PATCH("/:id/services/:serviceId", middleware.Auth(deps.Config.JWT), middleware.RequireRole(models.RoleOwner), shopHandler.UpdateService)
 		shopRoutes.DELETE("/services/:id", middleware.Auth(deps.Config.JWT), middleware.RequireRole(models.RoleOwner), shopHandler.DeleteService)
 		shopRoutes.GET("/:id/availability", slotHandler.GetSlots)
 	}

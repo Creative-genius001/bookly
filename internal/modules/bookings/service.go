@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"barber-booking-backend/internal/locks"
 	"barber-booking-backend/internal/models"
@@ -26,27 +28,43 @@ var (
 	ErrRescheduleNotAllowed = errors.New("reschedule is not allowed")
 	ErrCancelNotAllowed     = errors.New("booking cannot be cancelled within 1 hour of appointment")
 	ErrPaymentNotFound      = errors.New("payment not found")
+	ErrSlotCapacityExceeded = errors.New("slot capacity exceeded")
 )
 
 type Service struct {
 	db         *gorm.DB
 	locker     *locks.RedisLocker
+	logger     *slog.Logger
 	paystack   *paystack.Client
 	notifier   *notifications.Notifier
 	amountKobo int64
 }
 
 type InitiateResult struct {
-	Booking          models.Booking `json:"booking"`
-	Payment          models.Payment `json:"payment"`
-	AuthorizationURL string         `json:"authorization_url"`
-	AccessCode       string         `json:"access_code"`
+	Booking          BookingResponse `json:"booking"`
+	Payment          models.Payment  `json:"payment"`
+	AuthorizationURL string          `json:"authorization_url"`
+	AccessCode       string          `json:"access_code"`
 }
 
-func NewService(db *gorm.DB, locker *locks.RedisLocker, paystackClient *paystack.Client, notifier *notifications.Notifier, amountKobo int64) *Service {
+type BookingResponse struct {
+	ID               uuid.UUID `json:"id"`
+	Code             string    `json:"code"`
+	ShopID           uuid.UUID `json:"shop_id"`
+	ServiceID        uuid.UUID `json:"service_id"`
+	CustomerName     string    `json:"customer_name"`
+	CustomerEmail    string    `json:"customer_email"`
+	Status           string    `json:"status"`
+	StartsAt         time.Time `json:"starts_at"`
+	EndsAt           time.Time `json:"ends_at"`
+	PaymentReference string    `json:"payment_reference"`
+}
+
+func NewService(db *gorm.DB, locker *locks.RedisLocker, logger *slog.Logger, paystackClient *paystack.Client, notifier *notifications.Notifier, amountKobo int64) *Service {
 	return &Service{
 		db:         db,
 		locker:     locker,
+		logger:     logger,
 		paystack:   paystackClient,
 		notifier:   notifier,
 		amountKobo: amountKobo,
@@ -64,22 +82,48 @@ func (s *Service) findService(ctx context.Context, serviceID uuid.UUID) (*models
 	return &service, nil
 }
 
-func (s *Service) Initiate(ctx context.Context, payload initiateRequest) (InitiateResult, error) {
-	_, err := s.findService(ctx, payload.ServiceID)
-	if err != nil {
-		return InitiateResult{}, err
+func (s *Service) findShop(ctx context.Context, shopID uuid.UUID) (*models.Shop, error) {
+	var shop models.Shop
+	if err := s.db.WithContext(ctx).Where("id = ?", shopID).First(&shop).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errorMap.New(errorMap.CodeNotFound, "Booking Service", "shop not found")
+		}
+		return nil, errorMap.Wrap(err, errorMap.CodeInternal, "Booking Service: Find Shop", "shop not found")
 	}
-	lock, err := s.locker.Acquire(ctx, "lock:slot:"+payload.ServiceID.String(), 15*time.Second)
+	return &shop, nil
+}
+
+func (s *Service) Initiate(ctx context.Context, payload initiateRequest) (InitiateResult, error) {
+	key := setLockKey(payload.ServiceID.String(), payload.StartTime)
+	lock, err := s.locker.Acquire(ctx, key, 15*time.Second)
 	if err != nil {
 		return InitiateResult{}, errorMap.New(errorMap.CodeInternal, "Booking Service: Acquire slot lock", ErrSlotNotBookable.Error())
 	}
 	defer func() { _ = s.locker.Release(ctx, lock) }()
 
-	slot, shop, err := s.bookableSlot(ctx, payload.ServiceID, time.Now())
+	service, err := s.findService(ctx, payload.ServiceID)
 	if err != nil {
 		return InitiateResult{}, err
 	}
 
+	shop, err := s.findShop(ctx, service.ShopID)
+	if err != nil {
+		return InitiateResult{}, err
+	}
+	endTime := payload.StartTime.Add(time.Duration(service.DurationInMinutes) * time.Minute)
+
+	err = validateBookingTime(payload.StartTime, endTime, time.Now().UTC())
+	if err != nil {
+		return InitiateResult{}, err
+	}
+
+	ok, err := s.isSlotAvailable(ctx, shop.CapacityPerSlot, service.ShopID, payload.StartTime, endTime)
+	if err != nil {
+		return InitiateResult{}, err
+	}
+	if !ok {
+		return InitiateResult{}, errorMap.New(errorMap.CodeInvalidInput, "Booking Service: Check slot availability", ErrSlotCapacityExceeded.Error())
+	}
 	code, err := s.uniqueBookingCode(ctx)
 	if err != nil {
 		return InitiateResult{}, err
@@ -91,18 +135,18 @@ func (s *Service) Initiate(ctx context.Context, payload initiateRequest) (Initia
 
 	booking := models.Booking{
 		Code:             code,
-		ShopID:           shop.ID,
+		ShopID:           service.ShopID,
 		ServiceID:        payload.ServiceID,
 		CustomerEmail:    payload.CustomerEmail,
 		CustomerName:     payload.CustomerName,
 		Status:           models.BookingPendingPayment,
-		StartsAt:         slot.StartsAt,
-		EndsAt:           slot.EndsAt,
+		StartsAt:         payload.StartTime,
+		EndsAt:           endTime,
 		PaymentReference: reference,
 	}
 	payment := models.Payment{
 		Reference:  reference,
-		AmountKobo: s.amountKobo,
+		AmountKobo: int64(service.Price) * 100, // convert to kobo
 		Status:     models.PaymentPending,
 	}
 
@@ -118,12 +162,13 @@ func (s *Service) Initiate(ctx context.Context, payload initiateRequest) (Initia
 
 	init, err := s.paystack.InitializeTransaction(ctx, paystack.InitializeRequest{
 		Email:     payload.CustomerEmail,
-		Amount:    s.amountKobo,
+		Amount:    payment.AmountKobo,
+		Channels:  []paystack.Channel{paystack.ChannelCard, paystack.ChannelBankTransfer},
 		Reference: reference,
 		Metadata: map[string]any{
 			"booking_code": booking.Code,
 			"booking_id":   booking.ID.String(),
-			"shop_id":      shop.ID.String(),
+			"shop_id":      service.ShopID.String(),
 			"service_id":   payload.ServiceID.String(),
 		},
 	})
@@ -131,66 +176,276 @@ func (s *Service) Initiate(ctx context.Context, payload initiateRequest) (Initia
 		return InitiateResult{}, err
 	}
 
+	bookingResponse := BookingResponse{
+		ID:               booking.ID,
+		Code:             booking.Code,
+		ShopID:           booking.ShopID,
+		ServiceID:        booking.ServiceID,
+		CustomerName:     booking.CustomerName,
+		CustomerEmail:    booking.CustomerEmail,
+		Status:           string(booking.Status),
+		StartsAt:         booking.StartsAt,
+		EndsAt:           booking.EndsAt,
+		PaymentReference: booking.PaymentReference,
+	}
+
 	return InitiateResult{
-		Booking:          booking,
+		Booking:          bookingResponse,
 		Payment:          payment,
 		AuthorizationURL: init.AuthorizationURL,
 		AccessCode:       init.AccessCode,
 	}, nil
 }
 
-func (s *Service) InitializePayment(ctx context.Context, customerID uuid.UUID, bookingCode string) (InitiateResult, error) {
+func (s *Service) InitializePayment(
+	ctx context.Context,
+	bookingCode string,
+	paymentReferenceCode string,
+) (InitiateResult, error) {
+
 	var booking models.Booking
-	if err := s.db.WithContext(ctx).
-		Where("code = ? AND customer_id = ? AND status = ?", bookingCode, customerID, models.BookingPendingPayment).
-		First(&booking).Error; err != nil {
+	err := s.db.WithContext(ctx).
+		Where(
+			"code = ? AND payment_reference = ? AND status = ?",
+			bookingCode,
+			paymentReferenceCode,
+			models.BookingPendingPayment,
+		).
+		First(&booking).
+		Error
+
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return InitiateResult{}, ErrBookingNotFound
+			return InitiateResult{}, errorMap.New(
+				errorMap.CodeNotFound,
+				"Booking Service",
+				ErrBookingNotFound.Error(),
+			)
 		}
-		return InitiateResult{}, err
+
+		return InitiateResult{}, errorMap.Wrap(
+			err,
+			errorMap.CodeInternal,
+			"Booking Service",
+			ErrBookingNotFound.Error(),
+		)
+	}
+
+	// booking already passed
+	if !booking.StartsAt.After(time.Now().UTC()) {
+		_ = s.db.WithContext(ctx).
+			Model(&booking).
+			Update("status", models.BookingExpired).
+			Error
+
+		return InitiateResult{}, errorMap.New(
+			errorMap.CodeInvalidInput,
+			"Booking Service",
+			"booking has already expired",
+		)
+	}
+
+	// pending booking timeout (15 mins)
+	if booking.CreatedAt.Add(15 * time.Minute).Before(time.Now().UTC()) {
+
+		_ = s.db.WithContext(ctx).
+			Model(&booking).
+			Update("status", models.BookingExpired).
+			Error
+
+		return InitiateResult{}, errorMap.New(
+			errorMap.CodeInvalidInput,
+			"Booking Service",
+			"booking payment session expired",
+		)
+	}
+
+	var service models.Service
+
+	if err := s.db.WithContext(ctx).
+		First(&service, "id = ?", booking.ServiceID).
+		Error; err != nil {
+
+		return InitiateResult{}, errorMap.Wrap(
+			err,
+			errorMap.CodeInternal,
+			"Booking Service",
+			"unable to find service",
+		)
 	}
 
 	var payment models.Payment
-	if err := s.db.WithContext(ctx).Where("booking_id = ? AND status = ?", booking.ID, models.PaymentPending).First(&payment).Error; err != nil {
+
+	err = s.db.WithContext(ctx).
+		Where(
+			"booking_id = ? AND status = ?",
+			booking.ID,
+			models.PaymentPending,
+		).
+		First(&payment).
+		Error
+
+	if err != nil {
+
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return InitiateResult{}, err
+			return InitiateResult{}, errorMap.Wrap(
+				err,
+				errorMap.CodeInternal,
+				"Booking Service",
+				"unable to find payment",
+			)
 		}
+
 		reference, err := paymentReference(booking.Code)
 		if err != nil {
 			return InitiateResult{}, err
 		}
+
 		payment = models.Payment{
 			BookingID:  booking.ID,
 			Reference:  reference,
-			AmountKobo: s.amountKobo,
+			AmountKobo: int64(service.Price) * 100,
 			Status:     models.PaymentPending,
 		}
-		if err := s.db.WithContext(ctx).Create(&payment).Error; err != nil {
-			return InitiateResult{}, err
+
+		if err := s.db.WithContext(ctx).
+			Create(&payment).
+			Error; err != nil {
+
+			return InitiateResult{}, errorMap.Wrap(
+				err,
+				errorMap.CodeInternal,
+				"Booking Service",
+				"unable to create payment",
+			)
 		}
-		booking.PaymentReference = reference
-		_ = s.db.WithContext(ctx).Model(&booking).Update("payment_reference", reference).Error
 	}
 
-	init, err := s.paystack.InitializeTransaction(ctx, paystack.InitializeRequest{
-		Email:     booking.CustomerEmail,
-		Amount:    payment.AmountKobo,
-		Reference: payment.Reference,
-		Metadata: map[string]any{
-			"booking_code": booking.Code,
-			"booking_id":   booking.ID.String(),
+	init, err := s.paystack.InitializeTransaction(
+		ctx,
+		paystack.InitializeRequest{
+			Email:     booking.CustomerEmail,
+			Amount:    payment.AmountKobo,
+			Reference: payment.Reference,
+			Channels: []paystack.Channel{
+				paystack.ChannelCard,
+				paystack.ChannelBankTransfer,
+			},
+			Metadata: map[string]any{
+				"booking_id":   booking.ID.String(),
+				"booking_code": booking.Code,
+				"service_id":   service.ID.String(),
+				"shop_id":      booking.ShopID.String(),
+			},
 		},
-	})
+	)
+
 	if err != nil {
 		return InitiateResult{}, err
 	}
 
+	bookingResponse := BookingResponse{
+		ID:               booking.ID,
+		Code:             booking.Code,
+		ShopID:           booking.ShopID,
+		ServiceID:        booking.ServiceID,
+		CustomerName:     booking.CustomerName,
+		CustomerEmail:    booking.CustomerEmail,
+		Status:           string(booking.Status),
+		StartsAt:         booking.StartsAt,
+		EndsAt:           booking.EndsAt,
+		PaymentReference: booking.PaymentReference,
+	}
+
 	return InitiateResult{
-		Booking:          booking,
+		Booking:          bookingResponse,
 		Payment:          payment,
 		AuthorizationURL: init.AuthorizationURL,
 		AccessCode:       init.AccessCode,
 	}, nil
+}
+
+func (s *Service) HandlePaymentSuccess(ctx context.Context, event paystack.WebhookEvent) error {
+	reference := event.Data.Reference
+
+	// Server-side verification — NEVER trust the webhook amount alone
+	verified, err := s.paystack.Verify(ctx, reference)
+	if err != nil {
+		return errorMap.Wrap(err, errorMap.CodeInternal, "Webhook", "could not verify transaction")
+	}
+	if verified.Status != "success" {
+		// Paystack says it's not actually successful — treat as failed
+		// email := event.Data.Customer.Email
+		s.logger.DebugContext(ctx, "User payment is successful", event)
+		// return s.handlePaymentFailed(ctx, email)
+	}
+	// if verified.AmountKobo != s.bookingPrice {
+	// 	// Amount tampering — refund and reject
+	// 	_ = s.paystack.Refund(ctx, paystack.RefundInput{TransactionReference: reference})
+	// 	return nil
+	// }
+
+	var payment models.Payment
+	if err := s.db.WithContext(ctx).Where("reference = ?", reference).First(&payment).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil // unknown reference — ignore
+		}
+		return errorMap.Wrap(err, errorMap.CodeInternal, "Webhook", "could not find payment")
+	}
+
+	// Acquire the slot lock — same lock used in Initiate()
+	var bookingForLock models.Booking
+	if err := s.db.WithContext(ctx).First(&bookingForLock, "id = ?", payment.BookingID).Error; err != nil {
+		return errorMap.Wrap(err, errorMap.CodeInternal, "Webhook", "could not find booking")
+	}
+
+	var confirmedBooking models.Booking
+	txErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var p models.Payment
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&p, "id = ?", payment.ID).Error; err != nil {
+			return err
+		}
+
+		if p.Status == models.PaymentSuccess || p.Status == models.PaymentRefunded {
+			return nil
+		}
+
+		var b models.Booking
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&b, "id = ?", p.BookingID).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Model(&p).Updates(map[string]interface{}{
+			"status":  models.PaymentSuccess,
+			"channel": event.Data.Channel, // "card" or "bank_transfer"
+			"paid_at": verified.PaidAt,
+		}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&b).Update("status", models.BookingConfirmed).Error; err != nil {
+			return err
+		}
+
+		confirmedBooking = b
+		return nil
+	})
+	if txErr != nil {
+		return errorMap.Wrap(txErr, errorMap.CodeInternal, "Webhook", "transaction failed")
+	}
+
+	// Post-transaction side effects — outside the transaction so a notification
+	// failure never rolls back the confirmed booking
+	// if needsRefund {
+	// 	_ = s.paystack.Refund(ctx, paystack.RefundInput{TransactionReference: reference})
+	// 	s.notifier.SendBookingExpired(confirmedBooking)
+	// 	return nil
+	// }
+
+	s.notifier.BookingConfirmed(ctx, confirmedBooking)
+	s.notifier.PaymentSuccess(ctx, confirmedBooking)
+	return nil
 }
 
 // func (s *Service) HandlePaystackWebhook(ctx context.Context, body []byte, signature string) error {
@@ -467,53 +722,68 @@ func (s *Service) InitializePayment(ctx context.Context, customerID uuid.UUID, b
 // 	return user, nil
 // }
 
-func (s *Service) bookableSlot(ctx context.Context, slotID uuid.UUID, now time.Time) (models.Slot, models.Shop, error) {
-	var slot models.Slot
-	if err := s.db.WithContext(ctx).Where("id = ?", slotID).First(&slot).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return models.Slot{}, models.Shop{}, ErrSlotNotBookable
-		}
-		return models.Slot{}, models.Shop{}, err
-	}
+// func (s *Service) bookableSlot(ctx context.Context, payload initiateRequest, now time.Time) (models.Slot, models.Shop, error) {
+// 	var service models.Service
+// 	if err := s.db.WithContext(ctx).Where("id = ?", payload.ServiceID).First(&service).Error; err != nil {
+// 		if errors.Is(err, gorm.ErrRecordNotFound) {
+// 			return models.Slot{}, models.Shop{}, ErrSlotNotBookable
+// 		}
+// 		return models.Slot{}, models.Shop{}, err
+// 	}
 
-	var shop models.Shop
-	if err := s.db.WithContext(ctx).Where("id = ?", slot.ShopID).First(&shop).Error; err != nil {
-		return models.Slot{}, models.Shop{}, err
-	}
-	if !shop.IsActive || slot.Status == models.SlotBlocked || !slot.StartsAt.After(now.UTC()) || slot.BookedCount >= slot.Capacity {
-		return models.Slot{}, models.Shop{}, ErrSlotNotBookable
-	}
+// 	var shop models.Shop
+// 	if err := s.db.WithContext(ctx).Where("id = ?", service.ShopID).First(&shop).Error; err != nil {
+// 		return models.Slot{}, models.Shop{}, err
+// 	}
+// 	if !shop.IsActive || slot.Status == models.SlotBlocked || payload.StartTime.After(now.UTC()) || slot.BookedCount >= slot.Capacity {
+// 		return models.Slot{}, models.Shop{}, ErrSlotNotBookable
+// 	}
 
-	loc, err := time.LoadLocation(shop.Timezone)
-	if err != nil {
-		return models.Slot{}, models.Shop{}, err
-	}
-	slotDate := utils.DateOnly(slot.StartsAt, loc)
-	if err := utils.ValidateBookingWindow(slotDate, loc, now); err != nil {
-		return models.Slot{}, models.Shop{}, ErrBookingWindow
-	}
+// 	loc, err := time.LoadLocation(shop.Timezone)
+// 	if err != nil {
+// 		return models.Slot{}, models.Shop{}, err
+// 	}
+// 	slotDate := utils.DateOnly(slot.StartsAt, loc)
+// 	if err := utils.ValidateBookingWindow(slotDate, loc, now); err != nil {
+// 		return models.Slot{}, models.Shop{}, ErrBookingWindow
+// 	}
 
-	var blockedCount int64
-	if err := s.db.WithContext(ctx).Model(&models.BlockedDate{}).
-		Where("shop_id = ? AND date = ?", shop.ID, slotDate).
-		Count(&blockedCount).Error; err != nil {
-		return models.Slot{}, models.Shop{}, err
-	}
-	if blockedCount > 0 {
-		return models.Slot{}, models.Shop{}, ErrSlotNotBookable
-	}
+// 	var blockedCount int64
+// 	if err := s.db.WithContext(ctx).Model(&models.BlockedDate{}).
+// 		Where("shop_id = ? AND date = ?", shop.ID, slotDate).
+// 		Count(&blockedCount).Error; err != nil {
+// 		return models.Slot{}, models.Shop{}, err
+// 	}
+// 	if blockedCount > 0 {
+// 		return models.Slot{}, models.Shop{}, ErrSlotNotBookable
+// 	}
 
-	var businessDay models.BusinessDay
-	if err := s.db.WithContext(ctx).
-		Where("shop_id = ? AND weekday = ? AND is_active = true", shop.ID, int(slot.StartsAt.In(loc).Weekday())).
-		First(&businessDay).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return models.Slot{}, models.Shop{}, ErrSlotNotBookable
-		}
-		return models.Slot{}, models.Shop{}, err
-	}
+// 	var businessDay models.BusinessDay
+// 	if err := s.db.WithContext(ctx).
+// 		Where("shop_id = ? AND weekday = ? AND is_active = true", shop.ID, int(slot.StartsAt.In(loc).Weekday())).
+// 		First(&businessDay).Error; err != nil {
+// 		if errors.Is(err, gorm.ErrRecordNotFound) {
+// 			return models.Slot{}, models.Shop{}, ErrSlotNotBookable
+// 		}
+// 		return models.Slot{}, models.Shop{}, err
+// 	}
 
-	return slot, shop, nil
+// 	return slot, shop, nil
+// }
+
+func (s *Service) isSlotAvailable(ctx context.Context, capacity int, shopID uuid.UUID, startTime, endTime time.Time) (bool, error) {
+	var count int64
+	statuses := []string{string(models.BookingConfirmed), string(models.BookingPendingPayment)}
+	if err := s.db.WithContext(ctx).Model(&models.Booking{}).
+		Where("shop_id = ? AND status IN ? AND ((starts_at < ? AND ends_at > ?))",
+			shopID,
+			statuses,
+			endTime, startTime,
+		).
+		Count(&count).Error; err != nil {
+		return false, errorMap.Wrap(err, errorMap.CodeInternal, "Booking Service: Check slot availability", "unexpected error occured")
+	}
+	return count < int64(capacity), nil
 }
 
 func (s *Service) uniqueBookingCode(ctx context.Context) (string, error) {
@@ -539,6 +809,34 @@ func paymentReference(code string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%s-%s", code, random), nil
+}
+
+func setLockKey(serviceId string, startTime time.Time) string {
+	return fmt.Sprintf(
+		"lock:booking:%s:%s",
+		serviceId,
+		startTime.UTC().Format(time.RFC3339),
+	)
+}
+
+func validateBookingTime(
+	startAt time.Time,
+	endAt time.Time,
+	now time.Time,
+) error {
+
+	start := startAt.UTC()
+	current := now.UTC()
+
+	if !start.After(current) {
+		return errorMap.New(errorMap.CodeInvalidInput, "Booking Service: Booking time past", "booking time is in the past")
+	}
+
+	if !endAt.After(current) {
+		return errorMap.New(errorMap.CodeInvalidInput, "Booking Service: Booking expired", "booking already expired")
+	}
+
+	return nil
 }
 
 func MarshalProviderPayload(value interface{}) datatypes.JSON {

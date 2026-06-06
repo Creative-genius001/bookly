@@ -2,7 +2,6 @@ package bookings
 
 import (
 	"errors"
-	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -21,7 +20,6 @@ type initiateRequest struct {
 	CustomerName  string    `json:"customer_name" binding:"required"`
 	CustomerEmail string    `json:"customer_email" binding:"required,email"`
 	StartTime     time.Time `json:"start_time" binding:"required"`
-	EndTime       time.Time `json:"end_time" binding:"required"`
 }
 
 type rescheduleRequest struct {
@@ -120,10 +118,10 @@ func WriteError(c *gin.Context, err error) {
 		case errorMap.CodeInternal:
 			httpx.InternalServerError(c, appErr)
 		default:
-			httpx.Error(c, http.StatusInternalServerError, errorMap.New(errorMap.CodeInternal, "Shop Handler", "an unexpected error occurred").Error())
+			httpx.InternalServerError(c, appErr)
 		}
 		return
 	}
 
-	httpx.Error(c, http.StatusInternalServerError, errorMap.New(errorMap.CodeInternal, "Shop Handler", "an unexpected error occurred").Error())
+	httpx.InternalServerError(c, errorMap.Wrap(err, errorMap.CodeInternal, "Bookings Handler: Initiate booking", "an unexpected error occurred"))
 }

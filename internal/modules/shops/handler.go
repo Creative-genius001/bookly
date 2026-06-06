@@ -80,6 +80,7 @@ type UpdateServiceInput struct {
 	ServiceID              uuid.UUID
 	OwnerID                uuid.UUID
 	Name                   string
+	IsActive               bool
 	Description            string
 	Price                  int
 	BarbingDurationMinutes int
@@ -422,12 +423,12 @@ func (h *Handler) UpdateService(c *gin.Context) {
 		httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Shop Handler", "unauthorized user"))
 		return
 	}
-	shopID, ok := parseUUIDParam(c, "shopId")
+	shopID, ok := parseUUIDParam(c, "id")
 	if !ok {
 		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", "invalid shop ID"))
 		return
 	}
-	serviceID, ok := parseUUIDParam(c, "id")
+	serviceID, ok := parseUUIDParam(c, "serviceId")
 	if !ok {
 		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", "invalid service ID"))
 		return
@@ -458,7 +459,6 @@ func (h *Handler) UpdateService(c *gin.Context) {
 func parseUUIDParam(c *gin.Context, name string) (uuid.UUID, bool) {
 	value, err := uuid.Parse(c.Param(name))
 	if err != nil {
-		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Shop Handler", name+" must be a valid UUID"))
 		return uuid.Nil, false
 	}
 	return value, true

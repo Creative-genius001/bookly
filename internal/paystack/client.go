@@ -21,11 +21,18 @@ type Client struct {
 	httpClient *http.Client
 }
 
+type Channel string
+
+const (
+	ChannelCard         Channel = "card"
+	ChannelBankTransfer Channel = "bank_transfer"
+)
+
 type InitializeRequest struct {
 	Email     string         `json:"email"`
 	Amount    int64          `json:"amount"`
+	Channels  []Channel      `json:"channels,omitempty"`
 	Reference string         `json:"reference"`
-	Callback  string         `json:"callback_url,omitempty"`
 	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
@@ -45,6 +52,48 @@ type WebhookPayload struct {
 	} `json:"data"`
 }
 
+type TransferAccount struct {
+	AccountName   string `json:"account_name"`
+	AccountNumber string `json:"account_number"`
+	BankName      string `json:"bank_name"`
+}
+
+// WebhookEvent is the full payload Paystack POSTs to your webhook endpoint.
+type WebhookEvent struct {
+	Event string      `json:"event"`
+	Data  WebhookData `json:"data"`
+}
+
+type WebhookData struct {
+	Reference  string          `json:"reference"`
+	Status     string          `json:"status"` // success | failed | abandoned
+	AmountKobo int64           `json:"amount"`
+	Channel    string          `json:"channel"` // card | bank_transfer
+	PaidAt     time.Time       `json:"paid_at"`
+	Customer   WebhookCustomer `json:"customer"`
+	// Only populated when channel=bank_transfer
+	Authorization Authorization `json:"authorization"`
+}
+
+type Authorization struct {
+	AccountName   string `json:"account_name"`
+	AccountNumber string `json:"account_number"`
+	BankName      string `json:"bank"`
+	Channel       string `json:"channel"`
+}
+
+type WebhookCustomer struct {
+	Email string `json:"email"`
+}
+
+type VerifyResult struct {
+	Reference  string
+	Status     string // success | failed | abandoned
+	AmountKobo int64
+	Channel    string
+	PaidAt     time.Time
+}
+
 func NewClient(cfg config.PaystackConfig) *Client {
 	return &Client{
 		cfg: cfg,
@@ -58,8 +107,16 @@ func (c *Client) InitializeTransaction(ctx context.Context, req InitializeReques
 	if c.cfg.SecretKey == "" {
 		return InitializeResponse{}, fmt.Errorf("PAYSTACK_SECRET_KEY is required")
 	}
-	if req.Callback == "" {
-		req.Callback = c.cfg.CallbackURL
+
+	body := map[string]interface{}{
+		"email":        req.Email,
+		"amount":       req.Amount,
+		"reference":    req.Reference,
+		"callback_url": c.cfg.CallbackURL,
+		"channels":     req.Channels,
+	}
+	if len(req.Metadata) > 0 {
+		body["metadata"] = req.Metadata
 	}
 
 	var out struct {
@@ -67,7 +124,7 @@ func (c *Client) InitializeTransaction(ctx context.Context, req InitializeReques
 		Message string             `json:"message"`
 		Data    InitializeResponse `json:"data"`
 	}
-	if err := c.do(ctx, http.MethodPost, "/transaction/initialize", req, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/transaction/initialize", body, &out); err != nil {
 		return InitializeResponse{}, err
 	}
 	if !out.Status {
@@ -93,6 +150,35 @@ func (c *Client) Refund(ctx context.Context, reference string) error {
 		return fmt.Errorf("paystack refund failed: %s", out.Message)
 	}
 	return nil
+}
+
+func (c *Client) Verify(ctx context.Context, reference string) (VerifyResult, error) {
+	var resp struct {
+		Status  bool   `json:"status"`
+		Message string `json:"message"`
+		Data    struct {
+			Reference string    `json:"reference"`
+			Status    string    `json:"status"`
+			Amount    int64     `json:"amount"`
+			Channel   string    `json:"channel"`
+			PaidAt    time.Time `json:"paid_at"`
+		} `json:"data"`
+	}
+
+	if err := c.do(ctx, http.MethodGet, "/transaction/verify/"+reference, nil, &resp); err != nil {
+		return VerifyResult{}, fmt.Errorf("paystack verify: %w", err)
+	}
+	if !resp.Status {
+		return VerifyResult{}, fmt.Errorf("paystack verify: %s", resp.Message)
+	}
+
+	return VerifyResult{
+		Reference:  resp.Data.Reference,
+		Status:     resp.Data.Status,
+		AmountKobo: resp.Data.Amount,
+		Channel:    resp.Data.Channel,
+		PaidAt:     resp.Data.PaidAt,
+	}, nil
 }
 
 func (c *Client) ParseWebhook(body []byte, signature string) (WebhookPayload, error) {

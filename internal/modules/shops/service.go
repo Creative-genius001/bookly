@@ -390,8 +390,8 @@ func (s *Service) DeleteBlockedDate(ctx context.Context, ownerID, shopID, blocke
 	return nil
 }
 
-func (s *Service) AddService(ctx context.Context, payload AddServiceInput) (*models.Shop, error) {
-	shop, err := s.findOwnedShop(ctx, payload.OwnerID, payload.ShopID)
+func (s *Service) AddService(ctx context.Context, payload AddServiceInput) (*models.Service, error) {
+	_, err := s.findOwnedShop(ctx, payload.OwnerID, payload.ShopID)
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +411,7 @@ func (s *Service) AddService(ctx context.Context, payload AddServiceInput) (*mod
 	if err := s.db.Create(&service).Error; err != nil {
 		return nil, errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: Add service", "error adding service")
 	}
-	return &shop, nil
+	return &service, nil
 }
 
 func (s *Service) ListServices(ctx context.Context, shopID uuid.UUID) ([]models.Service, error) {
@@ -474,6 +474,10 @@ func (s *Service) UpdateService(ctx context.Context, payload UpdateServiceInput)
 
 	if payload.Name != "" {
 		service.Name = payload.Name
+		updated = true
+	}
+	if payload.IsActive != service.IsActive {
+		service.IsActive = payload.IsActive
 		updated = true
 	}
 	if payload.Description != "" {

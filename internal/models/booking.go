@@ -22,7 +22,7 @@ type Booking struct {
 	ShopID           uuid.UUID     `json:"shop_id" gorm:"type:uuid;not null;index"`
 	Shop             Shop          `json:"-" gorm:"constraint:OnDelete:CASCADE;"`
 	ServiceID        uuid.UUID     `json:"service_id" gorm:"type:uuid;not null;index"`
-	Service          Service       `json:"slot" gorm:"constraint:OnDelete:RESTRICT;"`
+	Service          Service       `json:"service" gorm:"constraint:OnDelete:RESTRICT;"`
 	CustomerName     string        `json:"customer_name" gorm:"type:varchar(100);not null"`
 	CustomerEmail    string        `json:"customer_email" gorm:"type:varchar(100);not null"`
 	Status           BookingStatus `json:"status" gorm:"type:varchar(30);not null;index"`
