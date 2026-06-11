@@ -2,11 +2,22 @@ package httpx
 
 import (
 	"net/http"
+	"strconv"
 
 	errorMap "barber-booking-backend/internal/utils/error"
 
 	"github.com/gin-gonic/gin"
 )
+
+// CachePublic marks a response as cacheable by browsers and shared caches/CDNs.
+func CachePublic(c *gin.Context, seconds int) {
+	c.Header("Cache-Control", "public, max-age="+strconv.Itoa(seconds))
+}
+
+// CachePrivate marks a response as cacheable by the requesting browser only.
+func CachePrivate(c *gin.Context, seconds int) {
+	c.Header("Cache-Control", "private, max-age="+strconv.Itoa(seconds))
+}
 
 func OK(c *gin.Context, data interface{}) {
 	c.JSON(http.StatusOK, gin.H{"data": data})

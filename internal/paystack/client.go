@@ -73,6 +73,9 @@ type WebhookData struct {
 	Customer   WebhookCustomer `json:"customer"`
 	// Only populated when channel=bank_transfer
 	Authorization Authorization `json:"authorization"`
+	// Only populated for transfer.* events
+	TransferCode string `json:"transfer_code"`
+	BookingCode  string `json:"booking_code"`
 }
 
 type Authorization struct {

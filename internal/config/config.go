@@ -11,6 +11,7 @@ type Config struct {
 	AppEnv             string
 	Port               string
 	APIBaseURL         string
+	FrontendURL        string
 	DatabaseURL        string
 	DatabaseLogSQL     bool
 	DatabaseSlowQuery  time.Duration
@@ -18,9 +19,37 @@ type Config struct {
 	Redis              RedisConfig
 	JWT                JWTConfig
 	Paystack           PaystackConfig
+	SMTP               SMTPConfig
+	Cloudinary         CloudinaryConfig
 	BookingAmountKobo  int64
 	RateLimitPerMinute int
+	// Platform commission (percent) withheld from each booking before it is
+	// credited to the shop's wallet. 0 = shops keep the full amount.
+	PlatformFeePercent int
 }
+
+type CloudinaryConfig struct {
+	CloudName string
+	APIKey    string
+	APISecret string
+	Folder    string
+}
+
+func (c CloudinaryConfig) Enabled() bool {
+	return c.CloudName != "" && c.APIKey != "" && c.APISecret != ""
+}
+
+type SMTPConfig struct {
+	Host     string
+	Port     int
+	Username string
+	Password string
+	From     string
+	UseTLS   bool
+}
+
+// Enabled reports whether real SMTP delivery is configured.
+func (s SMTPConfig) Enabled() bool { return s.Host != "" && s.From != "" }
 
 type LoggingConfig struct {
 	Level     string
@@ -87,10 +116,26 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	smtpPort, err := envInt("SMTP_PORT", 587)
+	if err != nil {
+		return Config{}, err
+	}
+
+	smtpUseTLS, err := envBool("SMTP_USE_TLS", false)
+	if err != nil {
+		return Config{}, err
+	}
+
+	platformFee, err := envInt("PLATFORM_FEE_PERCENT", 0)
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		AppEnv:            env("APP_ENV", "development"),
 		Port:              env("PORT", "8080"),
 		APIBaseURL:        env("API_BASE_URL", "http://localhost:8080"),
+		FrontendURL:       env("FRONTEND_URL", "http://localhost:3000"),
 		DatabaseURL:       env("DATABASE_URL", "postgres://barber:barber@localhost:5432/barber_booking?sslmode=disable"),
 		DatabaseLogSQL:    dbLogSQL,
 		DatabaseSlowQuery: time.Duration(dbSlowQueryMS) * time.Millisecond,
@@ -114,8 +159,23 @@ func Load() (Config, error) {
 			BaseURL:     env("PAYSTACK_BASE_URL", "https://api.paystack.co"),
 			CallbackURL: env("PAYSTACK_CALLBACK_URL", "http://localhost:3000/payment/callback"),
 		},
+		SMTP: SMTPConfig{
+			Host:     env("SMTP_HOST", ""),
+			Port:     smtpPort,
+			Username: env("SMTP_USERNAME", ""),
+			Password: env("SMTP_PASSWORD", ""),
+			From:     env("SMTP_FROM", ""),
+			UseTLS:   smtpUseTLS,
+		},
+		Cloudinary: CloudinaryConfig{
+			CloudName: env("CLOUDINARY_CLOUD_NAME", ""),
+			APIKey:    env("CLOUDINARY_API_KEY", ""),
+			APISecret: env("CLOUDINARY_API_SECRET", ""),
+			Folder:    env("CLOUDINARY_FOLDER", "bookly"),
+		},
 		BookingAmountKobo:  amountKobo,
 		RateLimitPerMinute: rateLimit,
+		PlatformFeePercent: platformFee,
 	}
 
 	if cfg.JWT.Secret == "" {

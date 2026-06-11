@@ -24,7 +24,7 @@ type initiateRequest struct {
 
 type rescheduleRequest struct {
 	Code      string    `json:"code" binding:"required"`
-	NewSlotID uuid.UUID `json:"new_slot_id" binding:"required"`
+	StartTime time.Time `json:"start_time" binding:"required"`
 }
 
 type cancelRequest struct {
@@ -50,56 +50,38 @@ func (h *Handler) Initiate(c *gin.Context) {
 	httpx.Created(c, result)
 }
 
-// func (h *Handler) Reschedule(c *gin.Context) {
-// 	customerID, ok := middleware.CurrentUserID(c)
-// 	if !ok {
-// 		httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Booking Handler", "unauthorized user"))
-// 		return
-// 	}
+// Reschedule moves a confirmed booking to a new time. Public — identified by the
+// booking code, no account required.
+func (h *Handler) Reschedule(c *gin.Context) {
+	var req rescheduleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Booking Handler", "request body is invalid"))
+		return
+	}
 
-// 	var req rescheduleRequest
-// 	if err := c.ShouldBindJSON(&req); err != nil {
-// 		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Booking Handler", "request body is invalid"))
-// 		return
-// 	}
+	booking, err := h.service.Reschedule(c.Request.Context(), req.Code, req.StartTime)
+	if err != nil {
+		WriteError(c, err)
+		return
+	}
+	httpx.OK(c, booking)
+}
 
-// 	booking, err := h.service.Reschedule(c.Request.Context(), customerID, req.Code, req.NewSlotID)
-// 	if err != nil {
-// 		WriteError(c, err)
-// 		return
-// 	}
-// 	httpx.OK(c, booking)
-// }
+// Cancel cancels a booking. Public — identified by the booking code.
+func (h *Handler) Cancel(c *gin.Context) {
+	var req cancelRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Booking Handler", "request body is invalid"))
+		return
+	}
 
-// func (h *Handler) Cancel(c *gin.Context) {
-// 	customerID, ok := middleware.CurrentUserID(c)
-// 	if !ok {
-// 		httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Booking Handler", "unauthorized user"))
-// 		return
-// 	}
-
-// 	var req cancelRequest
-// 	if err := c.ShouldBindJSON(&req); err != nil {
-// 		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Booking Handler", "request body is invalid"))
-// 		return
-// 	}
-
-// 	booking, err := h.service.Cancel(c.Request.Context(), customerID, req.Code)
-// 	if err != nil {
-// 		WriteError(c, err)
-// 		return
-// 	}
-// 	httpx.OK(c, booking)
-// }
-
-// func (h *Handler) GetByCode(c *gin.Context) {
-// 	booking, err := h.service.GetByCode(c.Request.Context(), c.Param("code"))
-// 	if err != nil {
-// 		WriteError(c, err)
-// 		return
-// 	}
-// 	httpx.OK(c, booking)
-// }
+	booking, err := h.service.Cancel(c.Request.Context(), req.Code)
+	if err != nil {
+		WriteError(c, err)
+		return
+	}
+	httpx.OK(c, booking)
+}
 
 func WriteError(c *gin.Context, err error) {
 	var appErr *errorMap.AppError

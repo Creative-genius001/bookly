@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	"barber-booking-backend/internal/models"
@@ -21,6 +22,16 @@ type AuthRepository interface {
 	RevokeToken(ctx context.Context, tx *gorm.DB, token *models.RefreshToken) error
 	StoreRefreshToken(ctx context.Context, tx *gorm.DB, token *models.RefreshToken) error
 	Logout(ctx context.Context, userID string, refreshToken string) error
+
+	CreatePasswordResetToken(ctx context.Context, token *models.PasswordResetToken) error
+	FindValidPasswordResetToken(ctx context.Context, hash string, now time.Time) (*models.PasswordResetToken, error)
+	MarkPasswordResetTokenUsed(ctx context.Context, tx *gorm.DB, id uuid.UUID) error
+	UpdateUserPassword(ctx context.Context, tx *gorm.DB, userID uuid.UUID, passwordHash string) error
+
+	CreateEmailVerificationToken(ctx context.Context, token *models.EmailVerificationToken) error
+	FindValidEmailVerificationToken(ctx context.Context, hash string, now time.Time) (*models.EmailVerificationToken, error)
+	MarkEmailVerificationTokenUsed(ctx context.Context, tx *gorm.DB, id uuid.UUID) error
+	MarkUserEmailVerified(ctx context.Context, tx *gorm.DB, userID uuid.UUID) error
 }
 
 type GormAuthRepository struct {

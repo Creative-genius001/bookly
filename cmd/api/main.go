@@ -17,6 +17,7 @@ import (
 	"barber-booking-backend/internal/notifications"
 	"barber-booking-backend/internal/paystack"
 	"barber-booking-backend/internal/server"
+	"barber-booking-backend/internal/storage"
 )
 
 func main() {
@@ -72,9 +73,24 @@ func main() {
 		}
 	}()
 
-	emailSender := notifications.NewLogEmailSender(logger)
+	// Use real SMTP delivery when configured, otherwise log emails. Either way
+	// delivery runs off the request path via the async decorator.
+	var emailSender notifications.EmailSender
+	if cfg.SMTP.Enabled() {
+		emailSender = notifications.NewAsyncEmailSender(notifications.NewSMTPEmailSender(cfg.SMTP), logger)
+		logger.Info("smtp email sender enabled", "host", cfg.SMTP.Host, "from", cfg.SMTP.From)
+	} else {
+		emailSender = notifications.NewLogEmailSender(logger)
+		logger.Info("log email sender enabled (set SMTP_HOST and SMTP_FROM for real delivery)")
+	}
 	notifier := notifications.NewNotifier(emailSender)
 	paystackClient := paystack.NewClient(cfg.Paystack)
+	uploader := storage.NewCloudinaryUploader(cfg.Cloudinary)
+	if uploader.Enabled() {
+		logger.Info("cloudinary uploads enabled", "cloud", cfg.Cloudinary.CloudName)
+	} else {
+		logger.Info("cloudinary uploads disabled (set CLOUDINARY_* env to enable)")
+	}
 
 	router := server.NewRouter(server.Dependencies{
 		Config:   cfg,
@@ -83,6 +99,7 @@ func main() {
 		Logger:   logger,
 		Notifier: notifier,
 		Paystack: paystackClient,
+		Uploader: uploader,
 	})
 
 	srv := &http.Server{

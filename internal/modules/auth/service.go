@@ -12,6 +12,7 @@ import (
 
 	"barber-booking-backend/internal/config"
 	"barber-booking-backend/internal/models"
+	"barber-booking-backend/internal/notifications"
 	"barber-booking-backend/internal/utils"
 	errorMap "barber-booking-backend/internal/utils/error"
 )
@@ -24,10 +25,12 @@ var (
 )
 
 type Service struct {
-	db     *gorm.DB
-	jwtCfg config.JWTConfig
-	repo   AuthRepository
-	logger *slog.Logger
+	db          *gorm.DB
+	jwtCfg      config.JWTConfig
+	repo        AuthRepository
+	logger      *slog.Logger
+	notifier    *notifications.Notifier
+	frontendURL string
 }
 
 type AuthResult struct {
@@ -35,8 +38,15 @@ type AuthResult struct {
 	Tokens utils.TokenPair     `json:"tokens"`
 }
 
-func NewService(db *gorm.DB, jwtCfg config.JWTConfig, repo AuthRepository, logger *slog.Logger) *Service {
-	return &Service{db: db, jwtCfg: jwtCfg, repo: repo, logger: logger}
+func NewService(db *gorm.DB, jwtCfg config.JWTConfig, repo AuthRepository, logger *slog.Logger, notifier *notifications.Notifier, frontendURL string) *Service {
+	return &Service{
+		db:          db,
+		jwtCfg:      jwtCfg,
+		repo:        repo,
+		logger:      logger,
+		notifier:    notifier,
+		frontendURL: frontendURL,
+	}
 }
 
 func (s *Service) Signup(ctx context.Context, email, phone, password string, role models.UserRole) (AuthResult, error) {
@@ -87,10 +97,11 @@ func (s *Service) Signup(ctx context.Context, email, phone, password string, rol
 		}
 
 		userResponse := models.UserResponse{
-			ID:    user.ID,
-			Email: user.Email,
-			Phone: user.Phone,
-			Role:  string(user.Role),
+			ID:            user.ID,
+			Email:         user.Email,
+			Phone:         user.Phone,
+			Role:          string(user.Role),
+			EmailVerified: user.EmailVerified,
 		}
 
 		result = AuthResult{
@@ -103,6 +114,12 @@ func (s *Service) Signup(ctx context.Context, email, phone, password string, rol
 
 	if err != nil {
 		return AuthResult{}, err
+	}
+
+	// Send the verification email outside the signup transaction so a delivery
+	// failure never blocks account creation.
+	if err := s.issueEmailVerification(ctx, user); err != nil {
+		s.logger.WarnContext(ctx, "could not issue email verification", "userID", user.ID, "error", err)
 	}
 
 	return result, nil
@@ -127,10 +144,11 @@ func (s *Service) Login(ctx context.Context, email, password string) (AuthResult
 	s.logger.DebugContext(ctx, "tokens issued", "email", email, "userID", userExist.ID)
 
 	userResponse := models.UserResponse{
-		ID:    userExist.ID,
-		Email: userExist.Email,
-		Phone: userExist.Phone,
-		Role:  string(userExist.Role),
+		ID:            userExist.ID,
+		Email:         userExist.Email,
+		Phone:         userExist.Phone,
+		Role:          string(userExist.Role),
+		EmailVerified: userExist.EmailVerified,
 	}
 
 	return AuthResult{User: userResponse, Tokens: tokens}, nil
@@ -183,10 +201,11 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (AuthResult,
 
 		result = AuthResult{
 			User: models.UserResponse{
-				ID:    user.ID,
-				Email: user.Email,
-				Phone: user.Phone,
-				Role:  string(user.Role),
+				ID:            user.ID,
+				Email:         user.Email,
+				Phone:         user.Phone,
+				Role:          string(user.Role),
+				EmailVerified: user.EmailVerified,
 			},
 			Tokens: tokens,
 		}

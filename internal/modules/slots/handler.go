@@ -3,7 +3,6 @@ package slots
 import (
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -26,7 +25,7 @@ func (h *Handler) GetSlots(c *gin.Context) {
 		return
 	}
 
-	result, err := h.service.AvailabilityForDate(c.Request.Context(), c.Param("id"), date, time.Now())
+	result, err := h.service.AvailabilityForDate(c.Request.Context(), c.Param("id"), date)
 	if err != nil {
 		var appErr *errorMap.AppError
 		if errors.As(err, &appErr) {
@@ -44,5 +43,6 @@ func (h *Handler) GetSlots(c *gin.Context) {
 		}
 	}
 
+	httpx.CachePublic(c, 30)
 	httpx.OK(c, result)
 }

@@ -19,24 +19,34 @@ type Handler struct {
 }
 
 type createShopRequest struct {
-	Name            string `json:"name" binding:"required"`
-	Slug            string `json:"slug"`
-	Email           string `json:"email" binding:"required,email"`
-	Phone           string `json:"phone" binding:"required"`
-	Timezone        string `json:"timezone" binding:"required"`
-	BarbingDuration int    `json:"barbing_duration"`
-	CapacityPerSlot int    `json:"capacity_per_slot"`
+	Name            string   `json:"name" binding:"required"`
+	Slug            string   `json:"slug"`
+	Email           string   `json:"email" binding:"required,email"`
+	Phone           string   `json:"phone" binding:"required"`
+	Timezone        string   `json:"timezone" binding:"required"`
+	Address         string   `json:"address"`
+	Latitude        *float64 `json:"latitude"`
+	Longitude       *float64 `json:"longitude"`
+	LogoURL         string   `json:"logo_url"`
+	CoverImageURL   string   `json:"cover_image_url"`
+	BarbingDuration int      `json:"barbing_duration"`
+	CapacityPerSlot int      `json:"capacity_per_slot"`
 }
 
 type updateShopRequest struct {
-	Name            *string `json:"name"`
-	Slug            *string `json:"slug"`
-	Email           *string `json:"email"`
-	Phone           *string `json:"phone"`
-	Timezone        *string `json:"timezone"`
-	IsActive        *bool   `json:"is_active"`
-	BarbingDuration *int    `json:"barbing_duration"`
-	CapacityPerSlot *int    `json:"capacity_per_slot"`
+	Name            *string  `json:"name"`
+	Slug            *string  `json:"slug"`
+	Email           *string  `json:"email"`
+	Phone           *string  `json:"phone"`
+	Timezone        *string  `json:"timezone"`
+	Address         *string  `json:"address"`
+	Latitude        *float64 `json:"latitude"`
+	Longitude       *float64 `json:"longitude"`
+	LogoURL         *string  `json:"logo_url"`
+	CoverImageURL   *string  `json:"cover_image_url"`
+	IsActive        *bool    `json:"is_active"`
+	BarbingDuration *int     `json:"barbing_duration"`
+	CapacityPerSlot *int     `json:"capacity_per_slot"`
 }
 
 type scheduleRequest struct {
@@ -116,6 +126,11 @@ func (h *Handler) CreateShop(c *gin.Context) {
 		Email:                  req.Email,
 		Phone:                  req.Phone,
 		Timezone:               req.Timezone,
+		Address:                req.Address,
+		Latitude:               req.Latitude,
+		Longitude:              req.Longitude,
+		LogoURL:                req.LogoURL,
+		CoverImageURL:          req.CoverImageURL,
 		BarbingDurationMinutes: req.BarbingDuration,
 		CapacityPerSlot:        req.CapacityPerSlot,
 	})
@@ -133,7 +148,25 @@ func (h *Handler) GetShop(c *gin.Context) {
 		writeShopError(c, err)
 		return
 	}
+	httpx.CachePublic(c, 60)
 	httpx.OK(c, shop)
+}
+
+// ListMyShops returns the authenticated owner's shop(s) so the dashboard can
+// rehydrate without remembering the shop id client-side. Returned as a list to
+// stay forward-compatible with multi-shop owners.
+func (h *Handler) ListMyShops(c *gin.Context) {
+	ownerID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		httpx.Unauthorized(c, errorMap.New(errorMap.CodeUnauthorized, "Shop Handler", "unauthorized user"))
+		return
+	}
+	shops, err := h.service.ListByOwner(c.Request.Context(), ownerID)
+	if err != nil {
+		writeShopError(c, err)
+		return
+	}
+	httpx.OK(c, shops)
 }
 
 func (h *Handler) UpdateShop(c *gin.Context) {
@@ -161,6 +194,11 @@ func (h *Handler) UpdateShop(c *gin.Context) {
 		Email:                  req.Email,
 		Phone:                  req.Phone,
 		Timezone:               req.Timezone,
+		Address:                req.Address,
+		Latitude:               req.Latitude,
+		Longitude:              req.Longitude,
+		LogoURL:                req.LogoURL,
+		CoverImageURL:          req.CoverImageURL,
 		IsActive:               req.IsActive,
 		BarbingDurationMinutes: req.BarbingDuration,
 		CapacityPerSlot:        req.CapacityPerSlot,
@@ -380,6 +418,7 @@ func (h *Handler) ListServices(c *gin.Context) {
 		writeShopError(c, err)
 		return
 	}
+	httpx.CachePublic(c, 60)
 	httpx.OK(c, services)
 }
 
@@ -414,6 +453,7 @@ func (h *Handler) GetService(c *gin.Context) {
 		writeShopError(c, err)
 		return
 	}
+	httpx.CachePublic(c, 60)
 	httpx.OK(c, service)
 }
 

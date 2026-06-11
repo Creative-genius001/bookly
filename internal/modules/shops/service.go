@@ -37,6 +37,11 @@ type CreateShopInput struct {
 	Email                  string
 	Phone                  string
 	Timezone               string
+	Address                string
+	Latitude               *float64
+	Longitude              *float64
+	LogoURL                string
+	CoverImageURL          string
 	BarbingDurationMinutes int
 	CapacityPerSlot        int
 }
@@ -49,6 +54,11 @@ type UpdateShopInput struct {
 	Email                  *string
 	Phone                  *string
 	Timezone               *string
+	Address                *string
+	Latitude               *float64
+	Longitude              *float64
+	LogoURL                *string
+	CoverImageURL          *string
 	IsActive               *bool
 	BarbingDurationMinutes *int
 	CapacityPerSlot        *int
@@ -99,14 +109,6 @@ func (s *Service) CreateShop(ctx context.Context, input CreateShopInput) (models
 		return models.Shop{}, err
 	}
 
-	var count int64
-	if err := s.db.WithContext(ctx).Model(&models.Shop{}).Where("owner_id = ?", input.OwnerID).Count(&count).Error; err != nil {
-		return models.Shop{}, err
-	}
-	if count > 0 {
-		return models.Shop{}, errorMap.New(errorMap.CodeInvalidInput, "Create Shop", ErrOwnerHasShop.Error())
-	}
-
 	slug := strings.TrimSpace(input.Slug)
 	if slug == "" {
 		slug = utils.Slugify(input.Name)
@@ -121,6 +123,11 @@ func (s *Service) CreateShop(ctx context.Context, input CreateShopInput) (models
 		Slug:                   slug,
 		Email:                  strings.ToLower(strings.TrimSpace(input.Email)),
 		Phone:                  strings.TrimSpace(input.Phone),
+		Address:                strings.TrimSpace(input.Address),
+		Latitude:               input.Latitude,
+		Longitude:              input.Longitude,
+		LogoURL:                strings.TrimSpace(input.LogoURL),
+		CoverImageURL:          strings.TrimSpace(input.CoverImageURL),
 		Timezone:               input.Timezone,
 		IsActive:               true,
 		BarbingDurationMinutes: input.BarbingDurationMinutes,
@@ -131,6 +138,21 @@ func (s *Service) CreateShop(ctx context.Context, input CreateShopInput) (models
 		return models.Shop{}, err
 	}
 	return shop, nil
+}
+
+// ListByOwner returns all shops belonging to an owner. Returned as a list so
+// the API is forward-compatible with multi-shop owners (the current schema
+// allows one, enforced in CreateShop).
+func (s *Service) ListByOwner(ctx context.Context, ownerID uuid.UUID) ([]models.Shop, error) {
+	var shops []models.Shop
+	err := s.db.WithContext(ctx).
+		Where("owner_id = ?", ownerID).
+		Order("created_at asc").
+		Find(&shops).Error
+	if err != nil {
+		return nil, errorMap.Wrap(err, errorMap.CodeInternal, "Shop Service: List by owner", "failed to list shops")
+	}
+	return shops, nil
 }
 
 func (s *Service) GetBySlug(ctx context.Context, slug string) (models.Shop, error) {
@@ -160,6 +182,21 @@ func (s *Service) UpdateShop(ctx context.Context, input UpdateShopInput) (models
 	}
 	if input.Phone != nil {
 		updates["phone"] = strings.TrimSpace(*input.Phone)
+	}
+	if input.Address != nil {
+		updates["address"] = strings.TrimSpace(*input.Address)
+	}
+	if input.Latitude != nil {
+		updates["latitude"] = *input.Latitude
+	}
+	if input.Longitude != nil {
+		updates["longitude"] = *input.Longitude
+	}
+	if input.LogoURL != nil {
+		updates["logo_url"] = strings.TrimSpace(*input.LogoURL)
+	}
+	if input.CoverImageURL != nil {
+		updates["cover_image_url"] = strings.TrimSpace(*input.CoverImageURL)
 	}
 	if input.Timezone != nil {
 		if err := validateTimezone(*input.Timezone); err != nil {

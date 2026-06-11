@@ -37,6 +37,23 @@ type logoutRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+type forgotPasswordRequest struct {
+	Email string `json:"email" binding:"required,email"`
+}
+
+type resetPasswordRequest struct {
+	Token    string `json:"token" binding:"required"`
+	Password string `json:"password" binding:"required"`
+}
+
+type verifyEmailRequest struct {
+	Token string `json:"token" binding:"required"`
+}
+
+type resendVerificationRequest struct {
+	Email string `json:"email" binding:"required,email"`
+}
+
 func NewHandler(service *Service, logger *slog.Logger) *Handler {
 	return &Handler{
 		service: service,
@@ -151,4 +168,95 @@ func (h *Handler) Logout(c *gin.Context) {
 	}
 
 	httpx.OK(c, gin.H{"message": "logged out"})
+}
+
+func (h *Handler) ForgotPassword(c *gin.Context) {
+	var req forgotPasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Forgot Password Handler", "a valid email is required"))
+		return
+	}
+
+	if err := h.service.ForgotPassword(c.Request.Context(), req.Email); err != nil {
+		var appErr *errorMap.AppError
+		if errors.As(err, &appErr) {
+			httpx.InternalServerError(c, appErr)
+			return
+		}
+		httpx.InternalServerError(c, errorMap.New(errorMap.CodeInternal, "Forgot Password Handler", "could not process request"))
+		return
+	}
+
+	// Always succeed so callers cannot enumerate registered emails.
+	httpx.OK(c, gin.H{"message": "if an account exists, a reset link has been sent"})
+}
+
+func (h *Handler) ResetPassword(c *gin.Context) {
+	var req resetPasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Reset Password Handler", "token and password are required"))
+		return
+	}
+
+	if err := h.service.ResetPassword(c.Request.Context(), req.Token, req.Password); err != nil {
+		var appErr *errorMap.AppError
+		if errors.As(err, &appErr) {
+			switch appErr.Code {
+			case errorMap.CodeInvalidInput:
+				httpx.BadRequest(c, appErr)
+			default:
+				httpx.InternalServerError(c, appErr)
+			}
+			return
+		}
+		httpx.InternalServerError(c, errorMap.New(errorMap.CodeInternal, "Reset Password Handler", "could not reset password"))
+		return
+	}
+
+	httpx.OK(c, gin.H{"message": "password updated"})
+}
+
+func (h *Handler) VerifyEmail(c *gin.Context) {
+	var req verifyEmailRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Verify Email Handler", "a verification token is required"))
+		return
+	}
+
+	if err := h.service.VerifyEmail(c.Request.Context(), req.Token); err != nil {
+		var appErr *errorMap.AppError
+		if errors.As(err, &appErr) {
+			switch appErr.Code {
+			case errorMap.CodeInvalidInput:
+				httpx.BadRequest(c, appErr)
+			default:
+				httpx.InternalServerError(c, appErr)
+			}
+			return
+		}
+		httpx.InternalServerError(c, errorMap.New(errorMap.CodeInternal, "Verify Email Handler", "could not verify email"))
+		return
+	}
+
+	httpx.OK(c, gin.H{"message": "email verified"})
+}
+
+func (h *Handler) ResendVerification(c *gin.Context) {
+	var req resendVerificationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.BadRequest(c, errorMap.New(errorMap.CodeInvalidInput, "Resend Verification Handler", "a valid email is required"))
+		return
+	}
+
+	if err := h.service.ResendVerification(c.Request.Context(), req.Email); err != nil {
+		var appErr *errorMap.AppError
+		if errors.As(err, &appErr) {
+			httpx.InternalServerError(c, appErr)
+			return
+		}
+		httpx.InternalServerError(c, errorMap.New(errorMap.CodeInternal, "Resend Verification Handler", "could not process request"))
+		return
+	}
+
+	httpx.OK(c, gin.H{"message": "if your account needs verification, a new link has been sent"})
 }
